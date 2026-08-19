@@ -1,0 +1,7 @@
+-r requirements.txt
+
+pytest==8.3.4
+pytest-asyncio==0.25.0
+aiosqlite==0.20.0                # SQLite backend for the test suite
+respx==0.22.0                    # httpx transport mocking for adapter tests
+ruff==0.8.4
