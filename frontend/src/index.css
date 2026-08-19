@@ -1,0 +1,86 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  }
+
+  /* Latency figures are read down a column. Tabular digits keep them aligned so
+     220 ms and 1,150 ms can be compared at a glance. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-ink-200 bg-white shadow-sm;
+  }
+
+  .card-header {
+    @apply flex items-start justify-between gap-4 border-b border-ink-200 px-5 py-4;
+  }
+
+  .card-title {
+    @apply text-sm font-semibold uppercase tracking-wide text-ink-500;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm
+           font-medium transition focus:outline-none focus:ring-2 focus:ring-accent-500
+           focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent-600 text-white hover:bg-accent-700;
+  }
+
+  .btn-secondary {
+    @apply btn border border-ink-300 bg-white text-ink-700 hover:bg-ink-50;
+  }
+
+  .btn-ghost {
+    @apply btn text-ink-600 hover:bg-ink-100;
+  }
+
+  .btn-danger {
+    @apply btn border border-red-300 bg-white text-red-700 hover:bg-red-50;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-ink-300 bg-white px-3 py-2 text-sm
+           text-ink-900 placeholder:text-ink-400 focus:border-accent-500
+           focus:outline-none focus:ring-1 focus:ring-accent-500 disabled:bg-ink-100;
+  }
+
+  .label {
+    @apply mb-1 block text-sm font-medium text-ink-700;
+  }
+
+  .hint {
+    @apply mt-1 text-xs text-ink-500;
+  }
+
+  .table {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .table th {
+    @apply whitespace-nowrap border-b border-ink-200 bg-ink-50 px-4 py-3 text-left
+           text-xs font-semibold uppercase tracking-wide text-ink-500;
+  }
+
+  .table td {
+    @apply border-b border-ink-100 px-4 py-3 text-ink-800;
+  }
+
+  .table tbody tr:hover {
+    @apply bg-ink-50;
+  }
+
+  .num {
+    @apply tabular text-right font-mono;
+  }
+}
