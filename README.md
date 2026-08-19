@@ -319,7 +319,7 @@ Two rules when writing an adapter:
 ## Running the tests
 
 ```bash
-cd backend && pytest -q           # 135 tests
+cd backend && pytest -q           # 146 tests
 cd backend && ruff check app tests
 
 cd frontend && npm test
@@ -347,6 +347,12 @@ curl https://busrapay.com/api/health
 ```
 
 Migrations run in the backend entrypoint before the server starts.
+
+> **Not yet built in anger.** The images have not been built end to end: the
+> environment this was developed in blocks Docker Hub's blob CDN, so
+> `docker compose build` could not run here. Everything else was verified against a
+> real PostgreSQL 16 and a real browser. Expect the first `docker compose build` on
+> the VPS to be the first true test of the Dockerfiles.
 
 The compose file publishes ports only on nginx. The backend and PostgreSQL are
 reachable on the internal Docker network alone, so there is no path to the API or the

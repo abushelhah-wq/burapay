@@ -113,12 +113,20 @@ Reference: https://support.checkout.com/hc/en-us/articles/14327357069074-Create-
 
 ## Next step
 
-```bash
-cp .env.example .env                       # then fill in what you have
-python3 -m pip install -r requirements.txt --break-system-packages
-# In BuraPay: Settings → enter the sandbox credentials → Gateways → Run health check
-# Then: Run Benchmark → pick the gateway → 3 transactions → check the results.
-python serve.py                            # or drive it through the web UI
-```
+Sandbox credentials are entered in the running application, not in a file — they are
+stored encrypted, so a key can be rotated without a redeploy.
 
-Run the benchmark **from your own MENA-region infrastructure**, not from a laptop on another continent or a cloud session in a random region. Network latency dominates every other difference this benchmark measures, so where you run it from is not a detail — it is the single biggest factor in whether the numbers mean anything. Set `MEASUREMENT_LOCATION` in `.env` so the results say where they came from.
+1. Bring the platform up (`docker compose up -d`, or see the README for a local run).
+2. **Settings → Gateway credentials** → pick the gateway → paste what the provider gave
+   you → Save. The form is generated from what the adapter declares, and it lists
+   exactly which fields are still missing.
+3. **Gateways → Run health check** confirms the credentials authenticate, using a
+   read-only endpoint. No payment is created.
+4. **Run Benchmark** → pick the gateway → Direct API → three transactions → look at the
+   per-call timings.
+
+Run the benchmark **from your own MENA-region infrastructure**, not from a laptop on
+another continent or a cloud session in a random region. Network latency dominates every
+other difference this benchmark measures, so where you run it from is not a detail — it
+is the single biggest factor in whether the numbers mean anything. Set `SERVER_REGION`
+in `.env` so every run records where it came from.

@@ -1,0 +1,20 @@
+# Local development artefacts that must never reach an image.
+.venv
+venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+*.db
+*.sqlite3
+data
+
+# Credentials, above all.
+.env
+.env.*
+.git
+
+# The tests run in CI, not in the runtime image.
+tests
+pytest.ini
+requirements-dev.txt

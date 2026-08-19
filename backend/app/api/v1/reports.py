@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -115,7 +115,7 @@ async def export_results(
         "summary": summary_rows,
         "api_breakdown": breakdown_rows,
     }
-    stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     if format == "excel":
         chosen = datasets if dataset == "all" else {dataset: datasets[dataset]}
@@ -123,7 +123,7 @@ async def export_results(
         filename = f"burapay-{dataset}-{stamp}.xlsx"
     elif format == "json":
         chosen = datasets if dataset == "all" else {dataset: datasets[dataset]}
-        payload = export.to_json({"generated_at": datetime.utcnow().isoformat(),
+        payload = export.to_json({"generated_at": datetime.now(timezone.utc).isoformat(),
                                   "filters": context, "data": chosen})
         filename = f"burapay-{dataset}-{stamp}.json"
     else:

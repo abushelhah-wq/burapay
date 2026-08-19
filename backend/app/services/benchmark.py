@@ -28,7 +28,7 @@ from typing import Any, Mapping, Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.errors import (BenchmarkError, ErrorCategory, NotConfigured, NotSupported,
+from app.core.errors import (ErrorCategory, NotConfigured, NotSupported,
                              normalize)
 from app.core.logging import get_logger
 from app.core.sanitizer import sanitize
@@ -236,7 +236,7 @@ async def run_direct_transaction(
         timer.mark(TimelineEvent.AUTHORIZATION_RESPONSE)
         _apply_result(transaction, result)
         timer.mark(TimelineEvent.FINAL_STATUS_CONFIRMED, status=result.status.value)
-    except (BenchmarkError, Exception) as exc:            # noqa: B014 - deliberate catch-all
+    except Exception as exc:                              # noqa: BLE001 - every failure is data
         timer.mark(TimelineEvent.ERROR, label=type(exc).__name__)
         _apply_failure(transaction, exc, gateway_code, "direct_payment")
         if isinstance(exc, (NotConfigured, NotSupported)):

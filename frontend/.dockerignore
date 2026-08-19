@@ -1,0 +1,13 @@
+# Without this, COPY . . overwrites the node_modules that `npm ci` just installed with
+# whatever the build host happens to have — including binaries built for another
+# platform — and copies a stale dist into the image.
+node_modules
+dist
+.vite
+npm-debug.log*
+
+# Nothing here belongs in a build context.
+.env
+.env.*
+*.local
+.git
