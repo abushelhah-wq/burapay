@@ -35,7 +35,10 @@ export default function Comparison() {
   const [integration, setIntegration] = useState('')
   const [currency, setCurrency] = useState('')
   const [days, setDays] = useState(30)
-  const [includeSimulated, setIncludeSimulated] = useState(false)
+  // Simulated results are shown by default and greyed in the charts. Hiding them
+  // would leave a page reading "nothing measured" while MockPay transactions exist;
+  // the exclusion that matters is from the ranking, which the API enforces regardless.
+  const [includeSimulated, setIncludeSimulated] = useState(true)
 
   useEffect(() => { api.gateways().then(setGateways).catch(() => setGateways([])) }, [])
 
@@ -55,7 +58,8 @@ export default function Comparison() {
       api.hppComparison({ currency: currency || undefined, date_from: dateFrom }),
       api.integrationComparison({ currency: currency || undefined, date_from: dateFrom }),
       api.ranking({ ...filters }),
-      api.timeseries({ ...filters, bucket: days > 7 ? 'day' : 'hour' }),
+      api.timeseries({ ...filters, include_simulated: includeSimulated,
+                       bucket: days > 7 ? 'day' : 'hour' }),
     ]).then(([comparison, hpp, integrationRows, rankingResult, timeseries]) => {
       setRows(comparison.rows)
       setNote(comparison.note)
@@ -215,12 +219,14 @@ export default function Comparison() {
                           <td className="num">{ms(row.api.stdev)}</td>
                           <td className="num">{ms(row.total.mean)}</td>
                           <td className="num">{percent(row.success_rate)}</td>
-                          <td className="text-xs text-ink-600">
+                          <td className="whitespace-nowrap text-xs text-ink-600">
                             {row.api_call_count ?? (row.api_call_count_range.join('–') || '—')}
+                            {/* The vendor's documented figure is a tooltip rather than a
+                                second line: it is a sentence, and inline it wrecks the
+                                column. The measured count is what the table compares. */}
                             {row.documented_calls && (
-                              <span className="block text-[11px] text-ink-400">
-                                doc: {row.documented_calls}
-                              </span>
+                              <span className="ml-1 cursor-help text-ink-400"
+                                    title={`Documented: ${row.documented_calls}`}>ⓘ</span>
                             )}
                           </td>
                           <td><SampleSize stats={row.api} /></td>

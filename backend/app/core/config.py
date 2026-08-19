@@ -18,7 +18,8 @@ import functools
 from typing import List, Literal, Optional
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+from typing_extensions import Annotated
 
 #: Only these are allowed as a gateway environment until production is explicitly
 #: unlocked. Section 26 of the specification: sandbox/test only by default.
@@ -57,7 +58,11 @@ class Settings(BaseSettings):
     #: Public HTTPS origin. Gateways redirect the browser back to it and POST
     #: webhooks to it, and every sandbox rejects non-HTTPS values for both.
     public_base_url: str = "https://busrapay.com"
-    cors_origins: List[str] = Field(default_factory=lambda: ["http://localhost:5173"])
+    #: NoDecode keeps pydantic-settings from trying to JSON-parse this. Without it,
+    #: the documented ``CORS_ORIGINS=https://busrapay.com`` fails at start-up because
+    #: a bare URL is not valid JSON.
+    cors_origins: Annotated[List[str], NoDecode] = Field(
+        default_factory=lambda: ["http://localhost:5173"])
 
     # -- benchmarking ----------------------------------------------------- #
     #: Safe default rate limit for automated runs (specification section 16).

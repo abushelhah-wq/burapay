@@ -28,7 +28,12 @@ export default function Dashboard() {
   if (!data) return <Spinner label="Loading dashboard" />
 
   const { summary, comparison, latest_runs, recent_transactions, gateway_health } = data
-  const realGateways = comparison.filter((row) => !row.is_simulated)
+  // Simulated gateways are charted — greyed, and labelled — rather than dropped. A
+  // chart that says "nothing measured" while MockPay transactions exist is wrong; a
+  // grey bar that says "simulator" is not. They stay out of the fastest-gateway claim
+  // and out of every ranking, which is where excluding them actually matters.
+  const charted = comparison
+  const hasSimulated = comparison.some((row) => row.is_simulated)
 
   return (
     <div className="space-y-6">
@@ -73,14 +78,14 @@ export default function Dashboard() {
       <Card title="Gateway API time — mean and P95"
             action={<Link to="/comparison" className="text-sm text-accent-600
                                                      hover:underline">Full comparison →</Link>}>
-        {realGateways.length ? (
+        {charted.length ? (
           <>
             <div className="grid gap-6 lg:grid-cols-2">
               <div>
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500">
                   Mean gateway API time
                 </p>
-                <MetricBarChart data={realGateways.map((row) => ({
+                <MetricBarChart data={charted.map((row) => ({
                   label: `${row.gateway_name} ${row.integration_type}`,
                   value: row.api.mean, sampleSize: row.api.count,
                   simulated: row.is_simulated,
@@ -90,7 +95,7 @@ export default function Dashboard() {
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-500">
                   P95 gateway API time
                 </p>
-                <MetricBarChart data={realGateways.map((row) => ({
+                <MetricBarChart data={charted.map((row) => ({
                   label: `${row.gateway_name} ${row.integration_type}`,
                   value: row.api.p95, sampleSize: row.api.count,
                   simulated: row.is_simulated,
@@ -102,6 +107,9 @@ export default function Dashboard() {
                 Gateway API time is the sum of the timed merchant-server calls only. It
                 excludes redirects, 3DS and any time a customer spent on a hosted page,
                 which are reported separately.
+                {hasSimulated && ' Grey bars are the MockPay simulator: those timings '
+                  + 'measure this platform’s own overhead, not a gateway’s, so they are '
+                  + 'excluded from rankings.'}
               </Note>
             </div>
           </>
@@ -204,7 +212,7 @@ export default function Dashboard() {
         ) : <EmptyState title="No transactions yet" />}
       </Card>
 
-      {realGateways.length > 0 && (
+      {charted.length > 0 && (
         <Card title="Comparison summary">
           <div className="overflow-x-auto">
             <table className="table">
@@ -217,7 +225,7 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody>
-                {realGateways.map((row) => (
+                {charted.map((row) => (
                   <tr key={`${row.gateway_code}-${row.integration_type}`}>
                     <td className="font-medium">
                       {row.gateway_name}{' '}

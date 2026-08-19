@@ -17,7 +17,7 @@ from app.api.deps import get_current_user, require_admin
 from app.core.errors import BenchmarkError, NotConfigured, NotSupported
 from app.core.logging import get_logger
 from app.db.session import get_session
-from app.models import BrowserMeasurement, TimelineEvent, Transaction, TransactionEvent, User
+from app.models import BrowserMeasurement, Transaction, User
 from app.schemas import (BrowserMetricsIn, Message, Page, StartTransactionRequest,
                          StartTransactionResponse, TransactionDetail, TransactionOut)
 from app.services import analytics
@@ -83,11 +83,9 @@ async def hpp_return(transaction_id: str, request: Request,
     if transaction is None:
         return RedirectResponse("/transactions?error=unknown-transaction", status_code=303)
 
-    session.add(TransactionEvent(
-        transaction_id=transaction.id,
-        event_type=TimelineEvent.RETURN_URL_RECEIVED.value,
-        event_timestamp=datetime.now(transaction.started_at.tzinfo),
-        offset_ms=0.0, label="Customer returned from gateway"))
+    # The RETURN_URL_RECEIVED event is recorded by complete_hpp_transaction, which
+    # knows the offset from the transaction's own start; recording it here as well
+    # would put a duplicate at offset zero, at the wrong end of the timeline.
     try:
         await complete_hpp_transaction(session, transaction, dict(request.query_params))
     except Exception as exc:                              # noqa: BLE001

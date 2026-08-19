@@ -172,3 +172,29 @@ class TestErrorNormalization:
         import httpx
         error = normalize(httpx.ReadTimeout("slow"), gateway="stripe", operation="pay")
         assert error.category is ErrorCategory.TIMEOUT
+
+
+class TestSettingsParsing:
+    """The env-var shapes documented in .env.example must actually load."""
+
+    def test_cors_origins_accepts_a_bare_comma_separated_list(self, monkeypatch):
+        # pydantic-settings JSON-decodes complex types by default, which made the
+        # documented `CORS_ORIGINS=https://busrapay.com` fail at start-up.
+        from app.core.config import Settings
+
+        monkeypatch.setenv("CORS_ORIGINS", "https://busrapay.com,http://localhost:5173")
+        assert Settings().cors_origins == ["https://busrapay.com", "http://localhost:5173"]
+
+    def test_cors_origins_accepts_a_single_origin(self, monkeypatch):
+        from app.core.config import Settings
+
+        monkeypatch.setenv("CORS_ORIGINS", "https://busrapay.com")
+        assert Settings().cors_origins == ["https://busrapay.com"]
+
+    def test_production_refuses_development_secrets(self, monkeypatch):
+        from app.core.config import DEV_SECRET_KEY, Settings
+
+        monkeypatch.setenv("APP_ENV", "production")
+        monkeypatch.setenv("APP_SECRET_KEY", DEV_SECRET_KEY)
+        settings = Settings()
+        assert "APP_SECRET_KEY" in settings.insecure_defaults()

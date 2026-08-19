@@ -569,3 +569,29 @@ class TestSettings:
                                                               auth_headers: dict):
         body = (await client.get("/v1/settings", headers=auth_headers)).json()
         assert body["environment"]["test_mode"] is True
+
+
+class TestTimelineIntegrity:
+    async def test_the_return_event_is_recorded_once_at_its_real_offset(
+            self, client: AsyncClient, auth_headers: dict):
+        """A duplicate at offset zero would put the customer's return at the start."""
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers, integration_type="hpp")
+        await client.get(f"/v1/transactions/{started['transaction_id']}/return",
+                         follow_redirects=False)
+
+        detail = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                   headers=auth_headers)).json()
+        returns = [event for event in detail["events"]
+                   if event["event_type"] == "RETURN_URL_RECEIVED"]
+        assert len(returns) == 1
+        assert returns[0]["offset_ms"] > 0
+
+    async def test_timeline_offsets_never_go_backwards(self, client: AsyncClient,
+                                                       auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers)
+        events = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                   headers=auth_headers)).json()["events"]
+        offsets = [event["offset_ms"] for event in events]
+        assert offsets == sorted(offsets)

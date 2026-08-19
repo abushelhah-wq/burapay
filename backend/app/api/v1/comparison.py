@@ -97,11 +97,12 @@ async def timeseries(gateway_code: Optional[List[str]] = Query(None),
                      bucket: str = Query("hour", pattern="^(minute|hour|day)$"),
                      date_from: Optional[datetime] = Query(None),
                      date_to: Optional[datetime] = Query(None),
+                     include_simulated: bool = Query(True),
                      _: User = Depends(get_current_user),
                      session: AsyncSession = Depends(get_session)) -> Dict[str, Any]:
     """Response time over time (section 15)."""
     filters = _filters(gateway_code, integration_type, currency, environment, None,
-                       None, date_from, date_to)
+                       None, date_from, date_to, include_simulated)
     return {"bucket": bucket,
             "series": await analytics.response_time_series(session, filters, bucket=bucket)}
 
