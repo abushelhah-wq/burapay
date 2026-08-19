@@ -28,3 +28,6 @@ exports/
 
 # OS noise
 .DS_Store
+
+# TLS material — issued on the host, never committed
+nginx/certs/

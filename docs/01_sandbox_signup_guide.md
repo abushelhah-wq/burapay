@@ -116,8 +116,8 @@ Reference: https://support.checkout.com/hc/en-us/articles/14327357069074-Create-
 ```bash
 cp .env.example .env                       # then fill in what you have
 python3 -m pip install -r requirements.txt --break-system-packages
-python scripts/bench.py --list             # which gateways your .env has configured
-python scripts/bench.py --runs 3           # a quick shakedown
+# In BuraPay: Settings → enter the sandbox credentials → Gateways → Run health check
+# Then: Run Benchmark → pick the gateway → 3 transactions → check the results.
 python serve.py                            # or drive it through the web UI
 ```
 

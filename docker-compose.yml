@@ -1,0 +1,111 @@
+# BuraPay Gateway Benchmark — full stack.
+#
+#   cp .env.example .env      # then fill in APP_SECRET_KEY, ENCRYPTION_KEY, DOMAIN
+#   docker compose build
+#   docker compose up -d
+#   curl https://busrapay.com/api/health
+#
+#   Internet → nginx (TLS) ─┬─→ frontend  (static React build)
+#                           └─→ backend   (FastAPI) → postgres
+#
+# Only nginx publishes ports. The backend and the database are reachable on the
+# internal network alone, so there is no path to the API or to PostgreSQL that does
+# not go through the proxy.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-burapay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-burapay}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-burapay} -d ${POSTGRES_DB:-burapay}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks: [burapay]
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-burapay}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-burapay}
+      APP_SECRET_KEY: ${APP_SECRET_KEY:?set APP_SECRET_KEY in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+      APP_ENV: ${APP_ENV:-production}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-https://busrapay.com}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://busrapay.com}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@busrapay.com}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD in .env}
+      # Section 26: sandbox only unless this is deliberately turned on.
+      ALLOW_PRODUCTION_GATEWAYS: ${ALLOW_PRODUCTION_GATEWAYS:-false}
+      BENCHMARK_MIN_INTERVAL_SECONDS: ${BENCHMARK_MIN_INTERVAL_SECONDS:-2}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVER_REGION: ${SERVER_REGION:-}
+    expose:
+      - "8000"
+    networks: [burapay]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "80"
+    networks: [burapay]
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-busrapay.com}
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      # Certificates are mounted from the host, never baked into an image.
+      - ./nginx/certs:/etc/letsencrypt:ro
+      - certbot-webroot:/var/www/certbot
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [burapay]
+
+  # Renewal runs on a timer and writes into the shared webroot; nginx serves the
+  # challenge files from there. Run the initial issuance with the profile below.
+  certbot:
+    image: certbot/certbot:latest
+    restart: unless-stopped
+    volumes:
+      - ./nginx/certs:/etc/letsencrypt
+      - certbot-webroot:/var/www/certbot
+    entrypoint: >
+      sh -c "trap exit TERM;
+             while :; do certbot renew --webroot -w /var/www/certbot --quiet;
+             sleep 12h & wait $${!}; done"
+    networks: [burapay]
+
+volumes:
+  postgres-data:
+  certbot-webroot:
+
+networks:
+  burapay:
+    driver: bridge
