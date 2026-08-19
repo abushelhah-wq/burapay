@@ -6,7 +6,7 @@ Run with no arguments and it produces the documentation-based workbook: the
 call-count comparison, the per-gateway endpoint map, and the 22 open data gaps,
 plus timing tabs with headers ready to receive real numbers.
 
-Run it after run_all.py and it folds the measured timings into those tabs and adds
+Run it after scripts/bench.py and it folds the measured timings into those tabs and adds
 a documented-vs-measured sheet.
 
     python build_workbook.py                        # uses results/latest.json if present
@@ -24,8 +24,11 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+ROOT = os.path.dirname(SCRIPT_DIR)
+for path in (SCRIPT_DIR, ROOT):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+RESULTS_DIR = os.path.join(ROOT, "results")
 
 try:
     from openpyxl import Workbook
@@ -37,7 +40,7 @@ except ImportError:  # pragma: no cover - dependency guard
           file=sys.stderr)
     raise SystemExit(1)
 
-from harness import FLOW_LABELS, FLOWS, RESULTS_DIR  # noqa: E402
+from app.adapters.base import FLOW_LABELS, FLOWS  # noqa: E402
 from reference_data import (CALL_COUNT_MATRIX, DATA_GAPS, ENDPOINT_MAP,  # noqa: E402
                             GATEWAYS, KEY_FINDINGS, METHODOLOGY, SOURCES)
 
@@ -136,7 +139,7 @@ def sheet_overview(workbook: Workbook, measured: Optional[Dict[str, Any]]) -> No
         row = _write_row(sheet, row, [
             "Timing data",
             "NOT PRESENT - every timing cell below is empty and awaiting a live run. "
-            "Run scripts/run_all.py against real sandboxes, then re-run "
+            "Run scripts/bench.py against real sandboxes, then re-run "
             "scripts/build_workbook.py to fold the numbers in."])
 
     row += 1
@@ -269,7 +272,7 @@ def sheet_timing(workbook: Workbook, measured: Optional[Dict[str, Any]]) -> None
                                  [gateway["label"], FLOW_LABELS[flow], "awaiting run",
                                   "", "", "", "", "", "", "", "", ""])
         _note(sheet, row + 1,
-              "Empty by design. Run scripts/run_all.py against live sandboxes, then "
+              "Empty by design. Run scripts/scripts/bench.py against live sandboxes, then "
               "scripts/build_workbook.py, to populate these rows.", len(TIMING_HEADERS))
         return
 
@@ -409,7 +412,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     path = build(args.output, results_path)
     print(f"Wrote {path}")
     if results_path is None:
-        print("Timing tabs are empty. Run run_all.py against live sandboxes, then re-run "
+        print("Timing tabs are empty. Run scripts/bench.py against live sandboxes, then re-run "
               "this script to fold the numbers in.")
     return 0
 

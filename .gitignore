@@ -19,3 +19,8 @@ gateway-benchmark/results/latest*.csv
 
 # OS noise
 .DS_Store
+
+# Web app
+certs/
+data/
+*.db

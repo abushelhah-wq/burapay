@@ -1,9 +1,0 @@
-# Runtime dependencies for the benchmark scripts.
-#
-# Install:  python3 -m pip install -r requirements.txt --break-system-packages
-# (see the README if that fails on a managed Python or behind a corporate proxy)
-
-requests>=2.31.0        # HTTP client used for every timed call
-python-dotenv>=1.0.0    # loads scripts/.env so credentials stay out of the shell history
-tabulate>=0.9.0         # console comparison tables (run_all.py degrades gracefully without it)
-openpyxl>=3.1.0         # writes results/gateway_benchmark_workbook.xlsx

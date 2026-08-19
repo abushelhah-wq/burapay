@@ -114,12 +114,11 @@ Reference: https://support.checkout.com/hc/en-us/articles/14327357069074-Create-
 ## Next step
 
 ```bash
-cd scripts
-cp .env.example .env          # then fill in what you have
+cp .env.example .env                       # then fill in what you have
 python3 -m pip install -r requirements.txt --break-system-packages
-python demo.py                # confirms the toolchain works, no credentials needed
-python run_all.py --list      # shows which gateways your .env has configured
-python run_all.py             # the real thing
+python scripts/bench.py --list             # which gateways your .env has configured
+python scripts/bench.py --runs 3           # a quick shakedown
+python serve.py                            # or drive it through the web UI
 ```
 
-Run `run_all.py` **from your own MENA-region infrastructure**, not from a laptop on another continent or a cloud session in a random region. Network latency dominates every other difference this benchmark measures, so where you run it from is not a detail — it is the single biggest factor in whether the numbers mean anything. Set `MEASUREMENT_LOCATION` in `.env` so the results say where they came from.
+Run the benchmark **from your own MENA-region infrastructure**, not from a laptop on another continent or a cloud session in a random region. Network latency dominates every other difference this benchmark measures, so where you run it from is not a detail — it is the single biggest factor in whether the numbers mean anything. Set `MEASUREMENT_LOCATION` in `.env` so the results say where they came from.

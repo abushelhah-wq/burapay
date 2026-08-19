@@ -1,0 +1,5 @@
+-r requirements.txt
+
+httpx2>=0.1.0                # starlette's TestClient transport
+openpyxl>=3.1.0              # workbook export in gateway-benchmark/
+tabulate>=0.9.0              # CLI comparison tables

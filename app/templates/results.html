@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% set active = 'results' %}
+{% block title %}Results &middot; busrapay{% endblock %}
+
+{% block content %}
+<h1>Results</h1>
+<p class="lede">Aggregated over successful attempts only. A run that died partway has a
+total that is not comparable with one that completed, so including it would quietly
+flatter whichever gateway fails fastest.</p>
+
+<section class="card">
+  <h2 class="step">Per gateway and flow</h2>
+  {% if summary %}
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr><th>Gateway</th><th>Flow</th><th class="num">Runs</th><th class="num">Calls</th>
+            <th class="num">min</th><th class="num">mean</th><th class="num">median</th>
+            <th class="num">p95</th><th class="num">max</th></tr>
+      </thead>
+      <tbody>
+        {% for row in summary %}
+        <tr>
+          <td>{{ labels.get(row.gateway, row.gateway) }}</td>
+          <td>{{ flow_labels.get(row.flow, row.flow) }}</td>
+          <td class="num">{{ row.n }}</td>
+          <td class="num">
+            {% if row.call_count is not none %}{{ row.call_count }}
+            {% else %}{{ row.call_count_range | join('–') }}{% endif %}
+          </td>
+          <td class="num">{{ '%.1f' | format(row.min) }}</td>
+          <td class="num">{{ '%.1f' | format(row.mean) }}</td>
+          <td class="num">{{ '%.1f' | format(row.median) }}</td>
+          <td class="num">{{ '%.1f' | format(row.p95) }}</td>
+          <td class="num">{{ '%.1f' | format(row.max) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="hint">Percentiles are nearest-rank, never interpolated, so every figure
+  shown is a latency that actually occurred. With only a handful of runs a p95 is not
+  yet meaningful — it needs a few dozen.</p>
+  {% else %}
+  <p class="hint">No successful attempts recorded yet.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2 class="step">Recent attempts</h2>
+  {% if attempts %}
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr><th>When (UTC)</th><th>Gateway</th><th>Flow</th><th>Status</th>
+            <th class="num">Calls</th><th class="num">Total ms</th><th>Detail</th></tr>
+      </thead>
+      <tbody>
+        {% for a in attempts %}
+        <tr>
+          <td class="mono">{{ a.created_at[:19] }}</td>
+          <td>{{ labels.get(a.gateway, a.gateway) }}</td>
+          <td>{{ flow_labels.get(a.flow, a.flow) }}</td>
+          <td><span class="pill {{ a.status }}">{{ a.status }}</span></td>
+          <td class="num">{{ a.call_count }}</td>
+          <td class="num">{{ '%.1f' | format(a.total_ms) }}</td>
+          <td class="truncate" title="{{ a.detail }}">{{ a.detail }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="hint">Nothing recorded yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

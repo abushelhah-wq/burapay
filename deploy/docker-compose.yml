@@ -1,0 +1,50 @@
+# Production stack: the app behind Caddy, which gets a real TLS certificate from
+# Let's Encrypt automatically and renews it.
+#
+#   1. Point your domain's A/AAAA record at this host.
+#   2. Put DOMAIN, ACME_EMAIL and your gateway credentials in ../.env
+#   3. docker compose -f deploy/docker-compose.yml up -d
+#
+# Ports 80 and 443 must be reachable from the internet — Caddy needs 80 for the ACME
+# HTTP challenge, and the gateways need 443 to deliver webhooks and return redirects.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      # Caddy terminates TLS, so the app trusts X-Forwarded-Proto and still sends HSTS.
+      BEHIND_PROXY: "1"
+      FORCE_HTTPS: "1"
+      PUBLIC_BASE_URL: "https://${DOMAIN:?set DOMAIN in .env}"
+      DATABASE_PATH: /srv/data/results.db
+    volumes:
+      - app-data:/srv/data
+    expose:
+      - "8000"
+    # No ports: mapping. The app is only reachable through Caddy, so there is no
+    # plaintext path to it from outside.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: "${DOMAIN:?set DOMAIN in .env}"
+      ACME_EMAIL: "${ACME_EMAIL:?set ACME_EMAIL in .env}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data      # certificates live here — keep this volume
+      - caddy-config:/config
+
+volumes:
+  app-data:
+  caddy-data:
+  caddy-config:
