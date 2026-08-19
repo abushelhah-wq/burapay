@@ -23,6 +23,48 @@ Everything that can be done ahead of that is done:
 - A test suite that drives all six modules end to end against a local mock, so you know the toolchain works before spending a sandbox credential on it
 - An Excel workbook pre-populated with the documentation-based comparison, with timing tabs ready to receive real data — [`results/gateway_benchmark_workbook.xlsx`](results/gateway_benchmark_workbook.xlsx)
 
+## Quickstart: one gateway, real response times, ~5 minutes
+
+If you just want to pick a gateway and capture its response times, do this. Stripe is the fastest starting point — self-serve signup, keys visible in the dashboard immediately, no email-confirmation wait.
+
+```bash
+# 1. Get a test key: https://dashboard.stripe.com/register
+#    Developers -> API keys -> copy the secret key (sk_test_...)
+
+# 2. Install
+cd gateway-benchmark/scripts
+python3 -m pip install -r requirements.txt --break-system-packages
+
+# 3. Point it at your key (never commit this; .env is gitignored)
+cp .env.example .env
+#    edit .env:  STRIPE_SECRET_KEY=sk_test_...
+#                MEASUREMENT_LOCATION=Riyadh office, corporate WAN
+
+# 4. Run just that gateway
+python run_all.py --gateway stripe
+```
+
+You get a per-flow table of call counts and min/mean/median/p95/max latency, plus
+`results/latest_summary.csv` and `results/latest_per_call.csv`. Add `--verbose` to
+watch each individual call as it completes.
+
+Swap `stripe` for `moyasar`, `adyen`, `checkout_com`, `hyperpay` or `geidea` as each
+set of credentials arrives — or list several at once. Nothing needs to be configured
+in any particular order, and gateways you have no keys for are skipped, not failed.
+
+**Where you run this matters more than anything else it measures.** Run it from the
+same infrastructure your merchants transact from. A run from a laptop on hotel WiFi,
+or from a cloud container in another continent, produces numbers that are mostly a
+measurement of the distance between you and the gateway — not of the gateway. Set
+`MEASUREMENT_LOCATION` so every result file records where it came from.
+
+Two practical notes before a full batch:
+
+- Do a shakedown first: `python run_all.py --gateway stripe --runs 3`. A full
+  30-run batch across six flows is ~180 live transactions per gateway.
+- `python demo.py` runs the whole pipeline against a local mock with no credentials
+  at all. If that works, everything except your keys is working.
+
 ## How to finish it
 
 1. **Get sandbox credentials.** Read [`docs/01_sandbox_signup_guide.md`](docs/01_sandbox_signup_guide.md). Start with **Geidea** (re-confirm sandbox access) and **HyperPay** (contact sales/merchant support) — neither is self-serve and both take human turnaround time. Stripe and Moyasar are the fastest path to first real numbers.
