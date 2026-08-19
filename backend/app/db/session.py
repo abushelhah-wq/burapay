@@ -26,7 +26,10 @@ def get_engine() -> AsyncEngine:
         kwargs: dict = {"echo": False, "future": True, "pool_pre_ping": True}
         if url.startswith("sqlite"):
             # SQLite has no pool to pre-ping and rejects the pool arguments below.
-            kwargs = {"echo": False, "future": True}
+            # The busy timeout matters: the benchmark engine writes from a background
+            # task while a request reads, and SQLite serialises writers.
+            kwargs = {"echo": False, "future": True,
+                      "connect_args": {"timeout": 30}}
         else:
             kwargs.update(pool_size=10, max_overflow=20, pool_recycle=1800)
         _engine = create_async_engine(url, **kwargs)

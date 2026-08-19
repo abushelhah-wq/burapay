@@ -1,0 +1,19 @@
+# Lint configuration. Line length is 96: these files carry a lot of explanatory
+# comments, and 79 turns them into ragged fragments.
+line-length = 96
+target-version = "py312"
+
+[lint]
+# Deliberately narrow. "I" would re-wrap hand-grouped imports; "UP" would rewrite
+# typing.Optional/Dict into PEP 604/585 form, which is fine in isolation but would
+# leave the codebase half in one style and half in the other.
+select = ["E", "F", "W", "B"]
+ignore = [
+    "B008",   # FastAPI dependencies are function calls in defaults, by design.
+    "E501",   # Long lines are caught by the formatter, not by the linter.
+]
+
+[lint.per-file-ignores]
+# Tests reach into private state deliberately (cancelling background run tasks).
+"tests/*" = ["B011", "SLF001"]
+"migrations/versions/*" = ["E501", "I001"]

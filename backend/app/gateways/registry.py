@@ -8,7 +8,7 @@ Nothing else in the application knows the difference between one gateway and ano
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Type
+from typing import Any, Dict, List, Mapping, Sequence, Type
 
 from app.core.config import settings
 from app.gateways.adyen import AdyenAdapter

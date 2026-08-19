@@ -29,7 +29,7 @@ import httpx
 
 from app.core.errors import GatewayError, NotConfigured, NotSupported
 from app.gateways.http import InstrumentedClient
-from app.models.enums import IntegrationType, NormalizedOperation, TransactionStatus
+from app.models.enums import IntegrationType, TransactionStatus
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,9 @@ DEFAULT_WEIGHTS: Dict[str, float] = {
     "success_rate": 0.20,
 }
 
+#: Shown wherever a score appears. Section 18: never presented as a standard.
+SCORE_LABEL = "Internal Benchmark Score"
+
 COMPONENT_LABELS = {
     "api_response_time": "API response time",
     "p95_latency": "P95 latency",
@@ -88,8 +91,10 @@ def score_all(inputs: Sequence[ScoreInput], weights: Optional[Dict[str, float]] 
 
     if not eligible:
         return {"weights": applied, "entries": [], "excluded": excluded,
-                "min_samples": min_samples,
-                "note": "Not enough comparable transactions to produce a ranking."}
+                "min_samples": min_samples, "label": SCORE_LABEL,
+                "note": ("Not enough comparable transactions to produce a ranking. "
+                         f"A gateway needs at least {min_samples} completed "
+                         "transactions before it is scored.")}
 
     best_mean = min((i.mean_api_ms for i in eligible if i.mean_api_ms), default=None)
     best_p95 = min((i.p95_api_ms for i in eligible if i.p95_api_ms), default=None)
@@ -128,7 +133,7 @@ def score_all(inputs: Sequence[ScoreInput], weights: Optional[Dict[str, float]] 
 
     return {"weights": applied, "entries": entries, "excluded": excluded,
             "min_samples": min_samples,
-            "label": "Internal Benchmark Score",
+            "label": SCORE_LABEL,
             "note": ("Internal Benchmark Score — a weighted roll-up defined by this "
                      "platform, not an industry standard. Scores are relative to the "
                      "best value observed within this comparison set.")}

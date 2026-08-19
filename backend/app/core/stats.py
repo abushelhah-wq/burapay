@@ -60,13 +60,19 @@ def summarize(values: Iterable[float]) -> Dict[str, Optional[float]]:
 
 
 def rates(successes: int, total: int) -> Dict[str, Optional[float]]:
-    """Success/failure percentages. Undefined rather than 0% when nothing ran."""
+    """Success/failure percentages. Undefined rather than 0% when nothing ran.
+
+    The count is returned as ``evaluated`` rather than ``total``: these keys are
+    merged into result rows that already carry a ``total`` latency summary, and a
+    collision there would silently replace a statistics object with an integer.
+    """
     if total <= 0:
-        return {"success_rate": None, "failure_rate": None, "total": 0, "successes": 0}
+        return {"success_rate": None, "failure_rate": None, "evaluated": 0,
+                "successes": 0}
     success_rate = round(successes / total * 100, 2)
     return {
         "success_rate": success_rate,
         "failure_rate": round(100 - success_rate, 2),
-        "total": total,
+        "evaluated": total,
         "successes": successes,
     }
