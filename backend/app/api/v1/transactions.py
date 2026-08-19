@@ -17,9 +17,10 @@ from app.api.deps import get_current_user, require_admin
 from app.core.errors import BenchmarkError, NotConfigured, NotSupported
 from app.core.logging import get_logger
 from app.db.session import get_session
-from app.models import BrowserMeasurement, Transaction, User
-from app.schemas import (BrowserMetricsIn, Message, Page, StartTransactionRequest,
-                         StartTransactionResponse, TransactionDetail, TransactionOut)
+from app.models import BrowserMeasurement, IntegrationType, Transaction, User
+from app.schemas import (BrowserMetricsIn, HppHandoff, Message, Page,
+                         StartTransactionRequest, StartTransactionResponse,
+                         TransactionDetail, TransactionOut)
 from app.services import analytics
 from app.services.benchmark import (BenchmarkRefused, complete_hpp_transaction,
                                     run_direct_transaction, start_hpp_transaction)
@@ -95,6 +96,38 @@ async def hpp_return(transaction_id: str, request: Request,
                               "operation": "hpp_return", "status": "error",
                               "error": str(exc)[:300]})
     return RedirectResponse(f"/transactions/{transaction.id}", status_code=303)
+
+
+@router.get("/{transaction_id}/hpp", response_model=HppHandoff)
+async def hpp_handoff(transaction_id: str, _: User = Depends(get_current_user),
+                      session: AsyncSession = Depends(get_session)) -> HppHandoff:
+    """What the browser needs to continue a hosted checkout.
+
+    Adyen's Sessions flow and HyperPay's Copy&Pay hand back an identifier for their
+    own browser component rather than a URL to redirect to, so the front end mounts
+    that component in a page of ours. This returns the client-side parameters for it —
+    never a credential.
+    """
+    transaction = await session.get(Transaction, transaction_id)
+    if transaction is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No such transaction.")
+    if transaction.integration_type != IntegrationType.HPP.value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="That transaction is not a hosted checkout.")
+
+    context = dict(transaction.context or {})
+    return HppHandoff(
+        transaction_id=transaction.id,
+        gateway_code=transaction.gateway_code,
+        status=transaction.status,
+        mode=str(context.get("mode") or "redirect"),
+        redirect_url=context.get("redirect_url"),
+        return_url=f"/api/v1/transactions/{transaction.id}/return",
+        environment=transaction.environment,
+        amount=transaction.amount,
+        currency=transaction.currency,
+        widget=dict(context.get("adapter_context") or {}))
 
 
 @router.post("/{transaction_id}/browser-metrics", response_model=Message)

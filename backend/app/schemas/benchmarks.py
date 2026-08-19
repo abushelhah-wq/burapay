@@ -183,6 +183,30 @@ class TransactionDetail(BaseModel):
     documented_calls: Optional[str] = None
 
 
+class HppHandoff(BaseModel):
+    """What the browser needs to mount a gateway's own checkout component.
+
+    Only ever the values the gateway mints for client-side use — a session id, an
+    Adyen ``sessionData`` blob, a public client key. No credential is returned here;
+    an API key or a secret would be redacted by the sanitizer long before this point.
+    """
+
+    transaction_id: str
+    gateway_code: str
+    status: str
+    #: ``redirect`` for a plain hand-off, ``widget`` when the gateway's SDK must be
+    #: mounted in our own page instead.
+    mode: str
+    redirect_url: Optional[str] = None
+    return_url: str
+    environment: str
+    amount: float
+    currency: str
+    #: Gateway-specific parameters for the SDK, e.g. ``session_id`` and
+    #: ``session_data`` for Adyen, ``checkout_id`` for HyperPay.
+    widget: Dict[str, Any] = Field(default_factory=dict)
+
+
 class BrowserMetricsIn(BaseModel):
     """Browser Performance API metrics reported by the front end (section 10).
 

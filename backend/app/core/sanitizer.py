@@ -28,8 +28,14 @@ SECRET_KEY_PARTS = frozenset({
     "secret", "secretkey", "clientsecret", "webhooksecret", "hmackey", "signature",
     "password", "passwd", "accesstoken", "token", "refreshtoken", "idtoken",
     "bearer", "privatekey", "publishablekey", "secrettoken", "credential",
-    "credentials", "cookie", "setcookie", "sessiondata", "entityid",
+    "credentials", "cookie", "setcookie", "entityid",
 })
+
+#: Deliberately NOT treated as secrets: values a gateway mints specifically to be
+#: handed to its own browser SDK. Adyen's ``sessionData`` is meaningless without the
+#: session it belongs to and is designed to reach the browser, so redacting it would
+#: break the Drop-in flow while protecting nothing.
+CLIENT_SIDE_FIELDS = frozenset({"sessiondata", "clientkey"})
 
 #: Card fields that must never be stored in any form.
 CARD_DROP_PARTS = frozenset({

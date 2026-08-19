@@ -3,7 +3,7 @@ from app.schemas.auth import (LoginRequest, PasswordChange, TokenResponse, UserC
 from app.schemas.benchmarks import (ApiMeasurementOut, BenchmarkRunCreate,
                                     BenchmarkRunDetail, BenchmarkRunOut,
                                     BrowserMeasurementOut, BrowserMetricsIn,
-                                    ComparisonTestCreate, ComparisonTestOut,
+                                    ComparisonTestCreate, ComparisonTestOut, HppHandoff,
                                     StartTransactionRequest, StartTransactionResponse,
                                     TransactionDetail, TransactionEventOut, TransactionOut)
 from app.schemas.common import (ErrorResponse, HealthResponse, Message, ORMModel, Page,
@@ -17,6 +17,7 @@ __all__ = [
     "BrowserMeasurementOut", "BrowserMetricsIn", "ComparisonTestCreate",
     "ComparisonTestOut", "CredentialFieldOut", "CredentialUpdate", "CredentialsOut",
     "ErrorResponse", "GatewayDetail", "GatewayHealthOut", "GatewayOut", "GatewayUpdate",
+    "HppHandoff",
     "HealthResponse", "LoginRequest", "Message", "ORMModel", "Page", "PasswordChange",
     "StartTransactionRequest", "StartTransactionResponse", "StatSummary",
     "TokenResponse", "TransactionDetail", "TransactionEventOut", "TransactionOut",

@@ -198,3 +198,21 @@ class TestSettingsParsing:
         monkeypatch.setenv("APP_SECRET_KEY", DEV_SECRET_KEY)
         settings = Settings()
         assert "APP_SECRET_KEY" in settings.insecure_defaults()
+
+
+class TestClientSideValues:
+    """Values a gateway mints for its own browser SDK must survive sanitization."""
+
+    def test_adyen_session_data_is_not_redacted(self):
+        # sessionData is opaque, useless without its session, and designed to reach the
+        # browser. Redacting it would break Drop-in while protecting nothing.
+        cleaned = sanitize({"session_data": "Ab02b4c0!BQABAg", "client_key": "test_ABC"})
+        assert cleaned["session_data"] == "Ab02b4c0!BQABAg"
+        assert cleaned["client_key"] == "test_ABC"
+
+    def test_real_secrets_beside_them_are_still_redacted(self):
+        cleaned = sanitize({"session_data": "blob", "api_key": "live_key",
+                            "access_token": "tok"})
+        assert cleaned["session_data"] == "blob"
+        assert cleaned["api_key"] == "[redacted]"
+        assert cleaned["access_token"] == "[redacted]"

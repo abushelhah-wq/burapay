@@ -16,6 +16,7 @@ import { useNavigate } from 'react-router-dom'
 import { api, ApiError } from '../api/client'
 import type { AppSettings, Gateway } from '../api/types'
 import { Badge, Card, ErrorNotice, Note, Spinner } from '../components/ui'
+import { markRedirect } from '../lib/browserMetrics'
 import { integrationLabel } from '../lib/format'
 
 type Mode = 'single' | 'run' | 'comparison'
@@ -85,12 +86,26 @@ export default function RunBenchmark() {
       amount: Number(amount), currency, description,
       reference: reference || undefined, methodology,
     })
+    if (result.mode === 'widget') {
+      // The gateway returned an identifier for its own browser component rather than
+      // a URL. Mount it in our own page; the customer never leaves this origin.
+      navigate(`/hpp/widget/${result.transaction_id}`)
+      return
+    }
     if (result.redirect_url) {
-      // HPP: the browser leaves for the gateway's own page. The transaction stays
-      // pending until it comes back through the return URL.
-      window.location.href = result.redirect_url.startsWith('http')
-        ? result.redirect_url
-        : `${window.location.origin}${result.redirect_url}`
+      // HPP: the browser leaves for the gateway's own page. Record when, because the
+      // gap between here and the return is time this origin cannot see.
+      markRedirect(result.transaction_id)
+      if (result.redirect_url.startsWith('http')) {
+        window.location.href = result.redirect_url
+      } else {
+        // A relative target is a page this application serves — only MockPay's
+        // simulated hosted page today. It needs the transaction id to find its way
+        // back, which a real gateway carries in its own session instead.
+        const separator = result.redirect_url.includes('?') ? '&' : '?'
+        window.location.href = `${window.location.origin}${result.redirect_url}`
+          + `${separator}transaction=${result.transaction_id}`
+      }
       return
     }
     navigate(`/transactions/${result.transaction_id}`)

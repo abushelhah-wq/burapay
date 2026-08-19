@@ -7,7 +7,9 @@ import Comparison from './pages/Comparison'
 import ComparisonTestDetail from './pages/ComparisonTestDetail'
 import Dashboard from './pages/Dashboard'
 import Gateways from './pages/Gateways'
+import HppWidget from './pages/HppWidget'
 import Login from './pages/Login'
+import MockCheckout from './pages/MockCheckout'
 import Reports from './pages/Reports'
 import RunBenchmark from './pages/RunBenchmark'
 import RunDetail from './pages/RunDetail'
@@ -31,6 +33,8 @@ export default function App() {
         <Route path="run" element={<RunBenchmark />} />
         <Route path="transactions" element={<Transactions />} />
         <Route path="transactions/:id" element={<TransactionDetail />} />
+        <Route path="hpp/widget/:id" element={<HppWidget />} />
+        <Route path="mock-checkout/:sessionId" element={<MockCheckout />} />
         <Route path="runs/:id" element={<RunDetail />} />
         <Route path="comparison" element={<Comparison />} />
         <Route path="comparison-tests/:id" element={<ComparisonTestDetail />} />

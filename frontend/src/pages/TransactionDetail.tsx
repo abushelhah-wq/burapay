@@ -11,6 +11,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { api } from '../api/client'
+import { collectReturnMetrics } from '../lib/browserMetrics'
 import type { TransactionDetail as Detail } from '../api/types'
 import { Badge, Card, DurationBar, EmptyState, ErrorNotice, Note, Spinner,
          StatusBadge } from '../components/ui'
@@ -37,6 +38,17 @@ export default function TransactionDetail() {
   }, [id])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    // Landing here after a hosted checkout is the one moment the browser can report
+    // anything: the return navigation is same-origin, and the wall-clock gap since
+    // the redirect is the time spent on the gateway's side. Reported once, then the
+    // marker is cleared so a refresh does not double-count.
+    if (!id) return
+    const collected = collectReturnMetrics(id)
+    if (!collected) return
+    api.reportBrowserMetrics(id, collected).then(load).catch(() => {})
+  }, [id, load])
 
   if (error) return <ErrorNotice error={error} onRetry={load} />
   if (!detail) return <Spinner label="Loading transaction" />

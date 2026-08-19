@@ -595,3 +595,43 @@ class TestTimelineIntegrity:
                                    headers=auth_headers)).json()["events"]
         offsets = [event["offset_ms"] for event in events]
         assert offsets == sorted(offsets)
+
+
+class TestHppHandoff:
+    async def test_handoff_returns_the_client_side_parameters(self, client: AsyncClient,
+                                                              auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers, integration_type="hpp")
+        response = await client.get(f"/v1/transactions/{started['transaction_id']}/hpp",
+                                    headers=auth_headers)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["gateway_code"] == "mockpay"
+        assert body["mode"] == "redirect"
+        assert body["return_url"].endswith("/return")
+
+    async def test_handoff_never_carries_a_credential(self, client: AsyncClient,
+                                                      auth_headers: dict):
+        """The widget parameters go to the browser, so they must hold nothing secret."""
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers, integration_type="hpp")
+        body = (await client.get(f"/v1/transactions/{started['transaction_id']}/hpp",
+                                 headers=auth_headers)).json()
+        blob = json.dumps(body).lower()
+        for forbidden in ("secret", "api_key", "password", "access_token"):
+            assert forbidden not in blob
+
+    async def test_direct_transactions_have_no_handoff(self, client: AsyncClient,
+                                                       auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers)
+        response = await client.get(f"/v1/transactions/{started['transaction_id']}/hpp",
+                                    headers=auth_headers)
+        assert response.status_code == 400
+
+    async def test_handoff_requires_authentication(self, client: AsyncClient,
+                                                   auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers, integration_type="hpp")
+        assert (await client.get(
+            f"/v1/transactions/{started['transaction_id']}/hpp")).status_code == 401

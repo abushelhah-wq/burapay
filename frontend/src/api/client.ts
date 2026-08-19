@@ -150,6 +150,10 @@ export const api = {
   transactions: (filters: TransactionFilters = {}) =>
     request<Page<Transaction>>(`/v1/transactions${query(filters as Record<string, unknown>)}`),
   transaction: (id: string) => request<TransactionDetail>(`/v1/transactions/${id}`),
+  hppHandoff: (id: string) =>
+    request<{ transaction_id: string; gateway_code: string; status: string; mode: string;
+      redirect_url: string | null; return_url: string; environment: string; amount: number;
+      currency: string; widget: Record<string, string> }>(`/v1/transactions/${id}/hpp`),
   deleteTransaction: (id: string) =>
     request<{ message: string }>(`/v1/transactions/${id}`, { method: 'DELETE' }),
   reportBrowserMetrics: (id: string, payload: {
