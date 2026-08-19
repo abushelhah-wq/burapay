@@ -1,16 +1,26 @@
-# BuraPay Gateway Benchmark — full stack.
+# BuraPay Gateway Benchmark — behind the VPS's existing Traefik.
 #
-#   cp .env.example .env      # then fill in APP_SECRET_KEY, ENCRYPTION_KEY, DOMAIN
+#   cd /opt && git clone https://github.com/abushelhah-wq/burapay.git && cd burapay
+#   cp .env.example .env          # then fill in the secrets and the Traefik settings
+#   ./scripts/inspect-traefik.sh  # prints the values this file needs from your VPS
 #   docker compose build
 #   docker compose up -d
 #   curl https://busrapay.com/api/health
 #
-#   Internet → nginx (TLS) ─┬─→ frontend  (static React build)
-#                           └─→ backend   (FastAPI) → postgres
+#   Internet → Traefik (already running, not managed here)
+#                 ├── Host(busrapay.com) && PathPrefix(/api) → backend  :8000
+#                 └── Host(busrapay.com)                     → frontend :80
+#                                                                 backend → postgres
 #
-# Only nginx publishes ports. The backend and the database are reachable on the
-# internal network alone, so there is no path to the API or to PostgreSQL that does
-# not go through the proxy.
+# Two networks, on purpose:
+#
+#   traefik   external, created and owned by whatever brought Traefik up. Only the
+#             frontend and the backend join it, because only they need to be reachable
+#             from outside.
+#   internal  created here, marked internal, and never routable from the internet.
+#             PostgreSQL lives here alone with the backend.
+#
+# Nothing publishes a port. The only way in is through Traefik.
 
 services:
   postgres:
@@ -28,7 +38,11 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    networks: [burapay]
+    # Internal only, and explicitly not discoverable by Traefik. A database behind a
+    # reverse proxy is a database on the internet.
+    labels:
+      - "traefik.enable=false"
+    networks: [internal]
 
   backend:
     build:
@@ -47,65 +61,75 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-https://busrapay.com}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@busrapay.com}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?set BOOTSTRAP_ADMIN_PASSWORD in .env}
-      # Section 26: sandbox only unless this is deliberately turned on.
+      # Sandbox only unless this is deliberately turned on.
       ALLOW_PRODUCTION_GATEWAYS: ${ALLOW_PRODUCTION_GATEWAYS:-false}
       BENCHMARK_MIN_INTERVAL_SECONDS: ${BENCHMARK_MIN_INTERVAL_SECONDS:-2}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       SERVER_REGION: ${SERVER_REGION:-}
     expose:
       - "8000"
-    networks: [burapay]
+    networks: [internal, traefik]
+    labels:
+      - "traefik.enable=true"
+      # Which network Traefik should talk to this container on. Required whenever a
+      # container sits on more than one network: without it Traefik may pick the
+      # internal address, which it cannot reach, and the route fails intermittently.
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik}"
+
+      # No StripPrefix middleware anywhere. FastAPI is mounted at /api via root_path,
+      # so it serves /api/health, /api/docs and /api/v1/... as its real paths. Traefik
+      # forwards the request unchanged, which is why /api/api/... can never arise.
+      - "traefik.http.routers.burapay-api.rule=Host(`${DOMAIN:-busrapay.com}`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.burapay-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.burapay-api.tls=true"
+      - "traefik.http.routers.burapay-api.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      # Higher than the frontend's router, which matches the same host with no path.
+      # Traefik's own rule-length tie-break would probably do the right thing here;
+      # stating the priority means it does not have to be inferred.
+      - "traefik.http.routers.burapay-api.priority=100"
+      - "traefik.http.services.burapay-api.loadbalancer.server.port=8000"
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     restart: unless-stopped
-    expose:
-      - "80"
-    networks: [burapay]
+    networks: [internal, traefik]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${TRAEFIK_NETWORK:-traefik}"
 
-  nginx:
-    image: nginx:1.27-alpine
-    restart: unless-stopped
-    depends_on:
-      - backend
-      - frontend
-    ports:
-      - "80:80"
-      - "443:443"
-    environment:
-      DOMAIN: ${DOMAIN:-busrapay.com}
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
-      # Certificates are mounted from the host, never baked into an image.
-      - ./nginx/certs:/etc/letsencrypt:ro
-      - certbot-webroot:/var/www/certbot
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-    networks: [burapay]
+      - "traefik.http.routers.burapay-web.rule=Host(`${DOMAIN:-busrapay.com}`)"
+      - "traefik.http.routers.burapay-web.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.burapay-web.tls=true"
+      - "traefik.http.routers.burapay-web.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.burapay-web.priority=1"
+      - "traefik.http.services.burapay-web.loadbalancer.server.port=80"
 
-  # Renewal runs on a timer and writes into the shared webroot; nginx serves the
-  # challenge files from there. Run the initial issuance with the profile below.
-  certbot:
-    image: certbot/certbot:latest
-    restart: unless-stopped
-    volumes:
-      - ./nginx/certs:/etc/letsencrypt
-      - certbot-webroot:/var/www/certbot
-    entrypoint: >
-      sh -c "trap exit TERM;
-             while :; do certbot renew --webroot -w /var/www/certbot --quiet;
-             sleep 12h & wait $${!}; done"
-    networks: [burapay]
+      # If — and only if — `./scripts/inspect-traefik.sh` shows no global HTTP→HTTPS
+      # redirect on this host, uncomment these to add one for this domain alone. Adding
+      # a second redirect on top of a global one is how a redirect loop happens, so
+      # check first.
+      # - "traefik.http.routers.burapay-web-http.rule=Host(`${DOMAIN:-busrapay.com}`)"
+      # - "traefik.http.routers.burapay-web-http.entrypoints=${TRAEFIK_HTTP_ENTRYPOINT:-web}"
+      # - "traefik.http.routers.burapay-web-http.middlewares=burapay-to-https"
+      # - "traefik.http.middlewares.burapay-to-https.redirectscheme.scheme=https"
+      # - "traefik.http.middlewares.burapay-to-https.redirectscheme.permanent=true"
 
 volumes:
   postgres-data:
-  certbot-webroot:
 
 networks:
-  burapay:
+  # Created and owned by whatever brought Traefik up on this host. Declared external
+  # so this project never creates, renames or removes it — if the name is wrong,
+  # `docker compose up` fails immediately and loudly rather than starting a stack
+  # Traefik cannot see.
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:-traefik}
+
+  # internal: true means Docker attaches no gateway to this network, so PostgreSQL has
+  # no route to or from the internet even if a port were published by mistake.
+  internal:
     driver: bridge
+    internal: true

@@ -19,6 +19,7 @@ is explicitly and deliberately unlocked.
 - [What this measures, and what it refuses to](#what-this-measures-and-what-it-refuses-to)
 - [Architecture](#architecture)
 - [Quick start with Docker](#quick-start-with-docker)
+- [Traefik integration](#traefik-integration)
 - [Local development](#local-development)
 - [Environment variables](#environment-variables)
 - [Database migrations](#database-migrations)
@@ -83,33 +84,40 @@ p50, p90, p95, p99, standard deviation and success rate together.
                     Internet
                        │
                        ▼
-              ┌─────────────────┐
-              │  nginx (TLS)    │  busrapay.com
-              └────────┬────────┘
+            ┌─────────────────────┐
+            │  Traefik  (TLS)     │  already running on the VPS,
+            └──────────┬──────────┘  not managed by this repository
                   ┌────┴─────┐
                   ▼          ▼
           ┌────────────┐  ┌──────────────┐
-          │  frontend  │  │   backend    │  /api/
-          │ React+Vite │  │   FastAPI    │
+          │  frontend  │  │   backend    │  Host(busrapay.com)
+          │ React+Vite │  │   FastAPI    │  && PathPrefix(/api)
           └────────────┘  └──────┬───────┘
                                  ▼
                           ┌─────────────┐
-                          │ PostgreSQL  │
+                          │ PostgreSQL  │  internal network only
                           └─────────────┘
 ```
+
+Two Docker networks. The **frontend** and **backend** join the existing Traefik
+network, because Traefik has to reach them. **PostgreSQL** sits alone with the backend
+on an `internal: true` network that has no route to or from the internet, and carries
+`traefik.enable=false` so it can never be exposed by accident. No service publishes a
+host port; the only way in is through Traefik.
 
 | Layer | Technology |
 | ----- | ---------- |
 | Backend | Python 3.12, FastAPI, SQLAlchemy 2 (async), Alembic, httpx |
 | Database | PostgreSQL 16 |
 | Frontend | React 18, TypeScript, Vite, Tailwind CSS, Recharts |
-| Proxy | nginx, with Let's Encrypt via certbot |
+| Proxy | the VPS's existing Traefik, via Docker labels |
 
 ---
 
 ## Quick start with Docker
 
 ```bash
+cd /opt
 git clone https://github.com/abushelhah-wq/burapay.git
 cd burapay
 cp .env.example .env
@@ -125,21 +133,33 @@ openssl rand -hex 32
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Set `POSTGRES_PASSWORD`, `BOOTSTRAP_ADMIN_PASSWORD` and `DOMAIN`, then:
+Set `POSTGRES_PASSWORD`, `BOOTSTRAP_ADMIN_PASSWORD` and `DOMAIN`.
+
+Then read the Traefik settings off the VPS rather than guessing them — this is the one
+part of the deployment where a wrong value can affect something else on the host:
+
+```bash
+./scripts/inspect-traefik.sh
+```
+
+It reports which Docker network Traefik is on, which entrypoint and certificate
+resolver the host's other applications already use, whether a global HTTP→HTTPS
+redirect exists, and whether anything already routes `busrapay.com`. It reads; it
+changes nothing. Put its suggestions in `.env` after checking them against its output,
+then:
 
 ```bash
 docker compose build
 docker compose up -d
 docker compose ps
-```
 
-TLS needs one manual step for the first certificate — see [`nginx/README.md`](nginx/README.md).
-Once it is issued:
-
-```bash
 curl https://busrapay.com/api/health
 # {"status":"healthy","database":"connected","version":"1.0.0",...}
 ```
+
+TLS is Traefik's. This project installs no certbot, stores no certificate, and changes
+no existing router, network or resolver. Details in
+[Traefik integration](#traefik-integration).
 
 Sign in at `https://busrapay.com` with `BOOTSTRAP_ADMIN_EMAIL` and
 `BOOTSTRAP_ADMIN_PASSWORD`, then change the password immediately.
@@ -205,6 +225,10 @@ Full list with commentary in [`.env.example`](.env.example). The ones that matte
 | `PUBLIC_BASE_URL` | The public HTTPS origin. Gateways redirect browsers back to it and POST webhooks to it. |
 | `CORS_ORIGINS` | Comma-separated browser origins allowed to call the API. |
 | `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | The first administrator, created only when the platform has no users at all. |
+| `DOMAIN` | The host Traefik routes to this stack. |
+| `TRAEFIK_NETWORK` | The existing Traefik Docker network to join. Read it off the VPS — see [Traefik integration](#traefik-integration). |
+| `TRAEFIK_ENTRYPOINT` | The existing HTTPS entrypoint name. |
+| `TRAEFIK_CERT_RESOLVER` | The existing certificate resolver. |
 | `ALLOW_PRODUCTION_GATEWAYS` | Defaults to `false`. Sandbox-only enforcement lives in the benchmark engine, not the UI. |
 | `BENCHMARK_MIN_INTERVAL_SECONDS` | Floor on the pause between automated transactions. |
 
@@ -336,17 +360,98 @@ build of both Docker images.
 
 ---
 
+## Traefik integration
+
+BuraPay runs behind the Traefik that is **already** on the VPS. It starts no Traefik of
+its own, creates no certificates, and changes nothing belonging to the other
+applications on that host.
+
+### The three values to read, never guess
+
+```bash
+./scripts/inspect-traefik.sh
+```
+
+| `.env` variable | What it is | How it fails if wrong |
+| --------------- | ---------- | --------------------- |
+| `TRAEFIK_NETWORK` | The Docker network Traefik is attached to | Loudly. The network is declared `external`, so `docker compose up` stops with *"network … declared as external, but could not be found"* and nothing starts. |
+| `TRAEFIK_ENTRYPOINT` | The HTTPS entrypoint name (`websecure`, `https`, …) | Quietly. Traefik never routes the domain and requests fall through to whatever its default is. |
+| `TRAEFIK_CERT_RESOLVER` | The certificate resolver (`letsencrypt`, `le`, `cloudflare`, …) | Quietly. Traefik serves its own self-signed certificate and browsers refuse the site. |
+
+The script reads them off the running Traefik container and off what the host's other
+applications already do, then prints a suggested `.env` block. Confirm each value
+against the output rather than pasting it blind — the two quiet failures above are
+worth thirty seconds of checking.
+
+It also answers two questions that protect what is already running:
+
+* **Does anything already route `busrapay.com`?** Two routers matching one host is how
+  a working application gets taken off the air.
+* **Is there already a global HTTP→HTTPS redirect?** If there is, BuraPay must not add
+  a second one — that is a redirect loop. The per-domain redirect labels are in
+  `docker-compose.yml`, commented out, for hosts that have no global one.
+
+### Routing, and why there is no path rewriting
+
+```
+Host(`busrapay.com`) && PathPrefix(`/api`)   →  backend  :8000   priority 100
+Host(`busrapay.com`)                         →  frontend :80     priority 1
+```
+
+There is **no StripPrefix middleware**, deliberately. FastAPI is mounted at `/api`
+through its `root_path`, so `/api/health`, `/api/docs` and `/api/v1/…` are the
+application's real paths, and Traefik forwards the request byte for byte. Nothing
+rewrites anything, so the classic `/api/api/v1/…` cannot arise — a request for it
+returns 404, as it should.
+
+The backend router carries the higher priority. Traefik's default tie-break on rule
+length would almost certainly pick it anyway, since its rule is the longer one; stating
+the priority means correctness does not rest on that.
+
+Both containers also carry `traefik.docker.network`. That label matters whenever a
+container is on more than one network: without it Traefik can pick the internal address
+it cannot reach, and the route fails intermittently in a way that is unpleasant to
+diagnose.
+
+### If TLS is terminated somewhere else
+
+If the VPS's Traefik sits behind Cloudflare or another terminator and does not issue
+certificates itself, drop these two labels from both services in `docker-compose.yml`:
+
+```yaml
+- "traefik.http.routers.burapay-*.tls=true"
+- "traefik.http.routers.burapay-*.tls.certresolver=${TRAEFIK_CERT_RESOLVER}"
+```
+
+and point `TRAEFIK_ENTRYPOINT` at whichever entrypoint that setup uses. Keep
+`PUBLIC_BASE_URL` on `https://` regardless: it is what gateways are told to redirect
+and post webhooks to, and every sandbox rejects a plaintext URL for either.
+
+### What this deployment will not touch
+
+No Traefik container, no global Traefik configuration, no existing router, network,
+entrypoint, certificate or resolver. The only network this project creates is its own
+`internal` one; the Traefik network is joined, never modified. PostgreSQL is never
+exposed to it.
+
 ## Production deployment
 
 ```bash
+cd /opt/burapay
 git pull
 docker compose build
 docker compose up -d
 docker compose ps
-curl https://busrapay.com/api/health
+
+curl https://busrapay.com/api/health     # {"status":"healthy",...}
+open https://busrapay.com/api/docs       # OpenAPI documentation
+open https://busrapay.com                # the application
 ```
 
 Migrations run in the backend entrypoint before the server starts.
+
+If a route does not come up, Traefik saw the container but disagreed with its labels.
+Its own log says which: `docker logs <traefik-container> | grep -i burapay`.
 
 > **Not yet built in anger.** The images have not been built end to end: the
 > environment this was developed in blocks Docker Hub's blob CDN, so
@@ -354,9 +459,10 @@ Migrations run in the backend entrypoint before the server starts.
 > real PostgreSQL 16 and a real browser. Expect the first `docker compose build` on
 > the VPS to be the first true test of the Dockerfiles.
 
-The compose file publishes ports only on nginx. The backend and PostgreSQL are
-reachable on the internal Docker network alone, so there is no path to the API or the
-database that does not pass through the proxy.
+No service publishes a host port. The frontend and backend are reachable only through
+Traefik, and PostgreSQL is on an `internal: true` network with no route to the internet
+at all — so there is no path to the API or the database that does not pass through the
+proxy.
 
 Every service declares a health check. The backend's exercises `/health`, which
 touches the database — a process that is up but cannot reach PostgreSQL reports
@@ -398,7 +504,8 @@ decrypted with anything else. Back the key up separately, and not on the same se
   where the provider offers it.
 * Passwords are hashed with bcrypt. Sessions are short-lived HS256 JWTs carrying only
   a user id, email and role.
-* `.env` is git-ignored, and so is `nginx/certs/`.
+* `.env` is git-ignored. No TLS private key or certificate is stored in this
+  repository — those belong to Traefik on the VPS.
 
 ### Test mode
 
@@ -495,9 +602,8 @@ burapay/
 │   │                      reports, gateways, settings
 │   └── Dockerfile
 │
-├── nginx/                 reverse proxy template and TLS notes
 ├── docs/                  gateway research: sandbox signup, API flow comparison
-├── scripts/               documentation workbook generator
+├── scripts/               Traefik inspection helper, workbook generator
 ├── results/               the documentation-based comparison workbook
 ├── docker-compose.yml
 ├── .env.example

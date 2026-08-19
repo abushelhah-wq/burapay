@@ -1,0 +1,43 @@
+# Static file server for the built front end.
+#
+# Something has to serve the compiled assets — Traefik routes and terminates TLS but
+# does not serve files — and per the deployment instruction that something is not
+# nginx. Caddy is a single static binary with a five-line config that does the three
+# things a single-page application needs: hashed assets cached hard, index.html never
+# cached, and unknown paths falling through to index.html so a client-side route
+# survives a page reload.
+#
+# The site address is a bare :80, which turns Caddy's automatic HTTPS off. TLS belongs
+# to Traefik; a second certificate manager here would fight it for port 80 and for the
+# ACME challenge.
+
+:80 {
+	root * /srv
+	encode zstd gzip
+
+	# A container-local liveness endpoint. Not routed by Traefik and not reachable
+	# from outside — it exists for the Docker health check.
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	# Asset filenames carry a content hash, so a given URL's bytes never change.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# index.html points at the current asset hashes. A cached copy would keep serving
+	# a deployment that no longer exists.
+	@index path / /index.html
+	header @index Cache-Control "no-cache, must-revalidate"
+
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	# /transactions/abc is a React route, not a file on disk.
+	try_files {path} /index.html
+	file_server
+}

@@ -152,3 +152,22 @@ jobs:
           ENCRYPTION_KEY: ci
           BOOTSTRAP_ADMIN_PASSWORD: ci
         run: docker compose config --quiet
+
+      - name: Check the Traefik wiring
+        env:
+          POSTGRES_PASSWORD: ci
+          APP_SECRET_KEY: ci
+          ENCRYPTION_KEY: ci
+          BOOTSTRAP_ADMIN_PASSWORD: ci
+        # The deployment contract, asserted against the rendered configuration: the
+        # database never reaches the Traefik network, nothing publishes a host port,
+        # the API router outranks the catch-all frontend router, and no StripPrefix
+        # middleware exists — FastAPI serves /api itself, so stripping it here is what
+        # produces /api/api/v1/... in production.
+        run: |
+          pip install pyyaml
+          docker compose config > /tmp/rendered-compose.yml
+          python3 scripts/check_traefik_wiring.py /tmp/rendered-compose.yml
+
+      - name: Check the inspection script
+        run: bash -n scripts/inspect-traefik.sh

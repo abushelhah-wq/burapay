@@ -1,7 +1,7 @@
 """
 BuraPay Gateway Benchmark — application entrypoint.
 
-Mounted behind nginx at ``/api``. The React front end owns everything else.
+Mounted behind the VPS's Traefik at ``/api``. The React front end owns everything else.
 
 Startup does three things: create the schema if Alembic has not (development only),
 seed the gateway catalogue and the bootstrap admin, and start the read-only gateway
@@ -85,7 +85,11 @@ app = FastAPI(
     description=DESCRIPTION,
     version=settings.app_version,
     lifespan=lifespan,
-    # Served behind nginx at /api, so the documented paths line up with the public URL.
+    # The application really is mounted at /api: Traefik routes PathPrefix(`/api`)
+    # here without stripping anything, so /api/health and /api/v1/... are this app's
+    # own paths and the documented URLs match the public ones exactly. Nothing
+    # rewrites a path anywhere in the chain, which is what keeps /api/api/... from
+    # ever arising.
     root_path="/api",
     docs_url="/docs",
     redoc_url="/redoc",

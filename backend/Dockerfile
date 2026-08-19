@@ -1,7 +1,8 @@
 # BuraPay backend.
 #
-# Runs migrations at start-up and then serves the API with uvicorn. TLS is not
-# terminated here — nginx sits in front and holds the certificate.
+# Runs migrations at start-up and then serves the API with uvicorn on port 8000. TLS
+# is not terminated here and no port is published: the VPS's Traefik holds the
+# certificate and is the only route in.
 
 FROM python:3.12-slim AS base
 
