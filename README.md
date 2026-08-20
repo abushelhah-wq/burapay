@@ -312,7 +312,7 @@ no frontend change.
 
 | Gateway | HPP | Direct API | Documented minimum calls |
 | ------- | --- | ---------- | ------------------------ |
-| Geidea | Payment session → hosted page | Session → initiate → authenticate payer → pay | HPP 2, Direct 4 (fixed) |
+| Geidea | Payment session → mounted checkout script | Session → initiate → authenticate payer → pay | HPP 2, Direct 4 (fixed) |
 | Stripe | Checkout Session | PaymentIntent create+confirm | HPP 1 + webhook, Direct 1–2 |
 | Adyen | Sessions flow (Drop-in) | Advanced flow `/payments` | HPP 1 + webhook, Direct 2–3 |
 | Checkout.com | Hosted payment link | `/payments` with a token | HPP 2, Direct 1–2 |
@@ -323,6 +323,12 @@ no frontend change.
 The documented figure sits next to the measured one everywhere, so a gateway that
 needs more calls than its documentation claims is visible immediately. That divergence
 is one of the more useful things this platform produces.
+
+Three of the six do not redirect for hosted checkout at all. Geidea, Adyen and
+HyperPay each return an identifier for their own browser component, so the platform
+mounts that component in a page of its own rather than sending the customer away.
+Geidea's script URL follows the configured region and can be overridden on the
+Settings page for an account served from a different host.
 
 Where a detail could not be confirmed from a vendor's public documentation, the
 adapter says so in its notes and makes the detail configurable rather than guessing

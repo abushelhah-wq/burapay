@@ -140,6 +140,56 @@ class TestGeidea:
         assert client.measurements[0].normalized_operation is NormalizedOperation.SESSION_CREATION
         await client.client.aclose()
 
+    async def test_hpp_mounts_the_checkout_script_when_no_url_is_returned(self):
+        """The real sandbox returns a session with no redirect URL — that is normal.
+
+        Geidea's hosted page is a component started with the session id, not a
+        destination, so the adapter hands the browser a widget rather than failing.
+        """
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/payment-intent/api/v2/direct/session": httpx.Response(200, json={
+                "responseCode": "000",
+                # The field list a live KSA sandbox actually returns: an id, an order,
+                # tokens, the echoed URLs — and no redirect URL anywhere.
+                "session": {"id": "sess_live", "status": "Initiated",
+                            "amount": 1.0, "currency": "SAR",
+                            "callbackUrl": "https://busrapay.test/api/webhooks/geidea",
+                            "returnUrl": "https://busrapay.test/return",
+                            "merchantPublicKey": "pk_test", "order": None,
+                            "tokenId": None, "cardOnFile": False}}),
+        }))
+
+        session = await adapter.create_hpp_session(client, request_for())
+        assert session.mode == "widget"
+        assert session.gateway_reference == "sess_live"
+        assert session.context["session_id"] == "sess_live"
+        assert session.context["script_url"].endswith("geideaCheckout.min.js")
+        await client.client.aclose()
+
+    async def test_hpp_still_redirects_when_an_account_returns_a_url(self):
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/payment-intent/api/v2/direct/session": httpx.Response(200, json={
+                "responseCode": "000",
+                "session": {"id": "sess_1", "redirectUrl": "https://geidea.test/pay/1"}}),
+        }))
+        session = await adapter.create_hpp_session(client, request_for())
+        assert session.mode == "redirect"
+        assert session.redirect_url == "https://geidea.test/pay/1"
+        await client.client.aclose()
+
+    def test_the_script_url_follows_the_region_and_can_be_overridden(self):
+        assert "ksamerchant" in build_adapter(
+            "geidea", {"merchant_public_key": "p", "api_password": "p"})._hpp_script_url()
+        assert "geidea.ae" in build_adapter(
+            "geidea", {"merchant_public_key": "p", "api_password": "p",
+                       "region": "uae"})._hpp_script_url()
+        # The setting the error message points at must actually be read.
+        assert build_adapter("geidea", {"merchant_public_key": "p", "api_password": "p",
+                                        "hpp_url": "https://custom.test/x.js"}
+                             )._hpp_script_url() == "https://custom.test/x.js"
+
     async def test_direct_runs_the_documented_four_call_sequence(self):
         adapter = self.adapter()
         client = client_for(adapter, route({

@@ -66,6 +66,16 @@ REGION_HOSTS = {
     "uae": "https://api.geidea.ae",
 }
 
+#: Where the hosted-checkout component is served from, per region. Geidea's hosted
+#: page is not a URL to redirect to — it is a script mounted in the merchant's own
+#: page and started with a session id. These mirror the API hosts; an account served
+#: from somewhere else can override the whole URL on the Settings page.
+REGION_HPP_SCRIPTS = {
+    "ksa": "https://www.ksamerchant.geidea.net/hpp/geideaCheckout.min.js",
+    "egypt": "https://www.merchant.geidea.net/hpp/geideaCheckout.min.js",
+    "uae": "https://www.geidea.ae/hpp/geideaCheckout.min.js",
+}
+
 #: Markers in an Initiate Authentication response that mean no challenge follows.
 #: Undocumented, so the default is conservative: anything unrecognised is treated as
 #: "challenge required" and the full sequence runs.
@@ -157,6 +167,9 @@ class GeideaAdapter(PaymentGatewayAdapter):
         "are configurable on this page.",
         "Geidea reports the outcome in responseCode, not only in the HTTP status. A 200 "
         "with responseCode != 000 is a failure and is recorded as one.",
+        "Hosted checkout is a component, not a redirect: the session response carries "
+        "an id and Geidea's own script is mounted in this application to run the "
+        "payment. Time spent in it is customer interaction time, not gateway latency.",
         "Tokenisation is a two-step affair: a Store card payment mints the token, and a "
         "later Stored token payment charges it. The token belongs to a cardholder, so "
         "it is shown once on the transaction that created it and is never stored as a "
@@ -164,7 +177,7 @@ class GeideaAdapter(PaymentGatewayAdapter):
     )
 
     documented_calls = {
-        "hpp": "2 (create session + confirm order)",
+        "hpp": "2 (create session + confirm order); the page itself is a mounted script",
         "direct": "4 fixed (session -> initiate -> authenticate payer -> pay)",
         "direct/token": "2 (fresh session + pay/token) — a session is required per charge",
     }
@@ -230,18 +243,28 @@ class GeideaAdapter(PaymentGatewayAdapter):
             raise GatewayError("Geidea: session response carried no session id", raw=body)
         return value
 
-    def _redirect_url(self, body: Dict[str, Any]) -> str:
-        """The hosted payment page URL. Geidea has used several field names for it."""
+    @staticmethod
+    def _redirect_url(body: Dict[str, Any]) -> Optional[str]:
+        """A hosted page URL, if this account returns one.
+
+        Most Geidea accounts do not: the documented hosted checkout is a script that
+        mounts in the merchant's page and is started with the session id. Some
+        configurations do hand back a URL, so it is used when present rather than
+        ignored — hence returning None instead of raising.
+        """
         session = body.get("session") or {}
         for candidate in ("redirectUrl", "redirect_url", "url", "paymentUrl", "checkoutUrl"):
             value = session.get(candidate) or body.get(candidate)
             if value:
-                return value
-        raise GatewayError(
-            "Geidea: session response carried no redirect URL. Fields present on the "
-            f"session object: {sorted(session)}. If your account returns the hosted "
-            "page under a different key, set the HPP URL on the Settings page.",
-            raw=body)
+                return str(value)
+        return None
+
+    def _hpp_script_url(self) -> str:
+        explicit = self.get("hpp_url")
+        if explicit:
+            return explicit
+        region = (self.get("region") or "ksa").lower()
+        return REGION_HPP_SCRIPTS.get(region, REGION_HPP_SCRIPTS["ksa"])
 
     @staticmethod
     def _order_id(body: Dict[str, Any]) -> Optional[str]:
@@ -303,12 +326,28 @@ class GeideaAdapter(PaymentGatewayAdapter):
 
     async def create_hpp_session(self, client: InstrumentedClient,
                                  request: PaymentRequest) -> HppSession:
+        """Create the session the hosted checkout runs against.
+
+        Geidea's hosted page is a component, not a destination: the session response
+        carries an id, and the browser starts Geidea's own checkout script with it.
+        That is the same shape as Adyen's Drop-in and HyperPay's Copy&Pay, so the
+        platform mounts it in a page of its own and the customer never leaves the
+        origin until Geidea's script decides they should.
+
+        An account configured to return a hosted URL still gets a plain redirect.
+        """
         body = await self._create_session(client, request)
         session_id = self._session_id(body)
-        return HppSession(redirect_url=self._redirect_url(body),
-                          gateway_reference=session_id,
-                          context={"session_id": session_id,
-                                   "reference": request.reference})
+        context = {"session_id": session_id, "reference": request.reference}
+
+        redirect = self._redirect_url(body)
+        if redirect:
+            return HppSession(redirect_url=redirect, gateway_reference=session_id,
+                              mode="redirect", context=context)
+
+        return HppSession(redirect_url=f"/hpp/widget/geidea/{session_id}",
+                          gateway_reference=session_id, mode="widget",
+                          context={**context, "script_url": self._hpp_script_url()})
 
     async def confirm_hpp_payment(self, client: InstrumentedClient,
                                   request: PaymentRequest, context: Mapping[str, Any],

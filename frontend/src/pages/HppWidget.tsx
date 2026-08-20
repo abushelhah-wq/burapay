@@ -85,7 +85,9 @@ export default function HppWidget() {
 
     async function mount(target: HTMLDivElement, data: Handoff) {
       try {
-        if (data.gateway_code === 'adyen') {
+        if (data.gateway_code === 'geidea') {
+          await mountGeidea(target, data)
+        } else if (data.gateway_code === 'adyen') {
           await mountAdyen(target, data)
         } else if (data.gateway_code === 'hyperpay') {
           await mountHyperPay(target, data)
@@ -126,7 +128,7 @@ export default function HppWidget() {
       </Card>
 
       <Note>
-        This gateway returns an identifier for its own browser component rather than a
+        This gateway returns an identifier for its own checkout component rather than a
         URL to redirect to, so the component runs here. Card details are handled by the
         gateway’s script and never reach this application. Timing from this point on is
         the customer’s and the gateway’s, and it is recorded separately from the
@@ -134,6 +136,63 @@ export default function HppWidget() {
       </Note>
     </div>
   )
+}
+
+/**
+ * Geidea's hosted checkout.
+ *
+ * The session response carries an id, not a URL — Geidea's page is a script that
+ * takes over the window once started. So this loads that script and calls
+ * `startPayment(sessionId)`, then hands the browser back to the return URL through
+ * whichever callback fires.
+ *
+ * The success callback carries the order, and its id is passed back on the return
+ * URL: the server confirms the outcome by fetching that order, rather than trusting
+ * what the browser says happened.
+ */
+async function mountGeidea(target: HTMLDivElement, data: Handoff): Promise<void> {
+  const sessionId = data.widget.session_id
+  if (!sessionId) throw new Error('Geidea returned no session id to start the checkout with.')
+
+  const scriptUrl = data.widget.script_url
+  if (!scriptUrl) {
+    throw new Error(
+      'No Geidea hosted checkout script URL. Set it on the Settings page under '
+      + '“Hosted checkout script URL”.')
+  }
+
+  try {
+    await loadScript(scriptUrl)
+  } catch {
+    throw new Error(
+      `Geidea's checkout script could not be loaded from ${scriptUrl}. If your account `
+      + 'is served from a different host, set the correct URL on the Settings page.')
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const GeideaCheckout = (window as any).GeideaCheckout
+  if (!GeideaCheckout) {
+    throw new Error('The Geidea checkout script loaded but exposed no GeideaCheckout.')
+  }
+
+  const back = (query: string) => {
+    const separator = data.return_url.includes('?') ? '&' : '?'
+    window.location.href = `${data.return_url}${separator}${query}`
+  }
+
+  const payment = new GeideaCheckout(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (response: any) => {
+      const orderId = response?.order?.orderId ?? response?.orderId ?? ''
+      back(`orderId=${encodeURIComponent(orderId)}`)
+    },
+    () => back('result=error'),
+    () => back('result=cancelled'),
+  )
+  // Geidea's script renders its own overlay, so the container stays empty; it is kept
+  // so a future version that mounts inline has somewhere to go.
+  target.dataset.geideaSession = sessionId
+  payment.startPayment(sessionId)
 }
 
 async function mountAdyen(target: HTMLDivElement, data: Handoff): Promise<void> {
