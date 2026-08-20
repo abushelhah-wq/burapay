@@ -14,19 +14,54 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin
+from app.core.config import settings as app_settings
 from app.core.errors import BenchmarkError, NotConfigured, NotSupported
 from app.core.logging import get_logger
 from app.db.session import get_session
+from app.gateways.base import Card
 from app.models import BrowserMeasurement, IntegrationType, Transaction, User
 from app.schemas import (BrowserMetricsIn, HppHandoff, Message, Page,
                          StartTransactionRequest, StartTransactionResponse,
-                         TransactionDetail, TransactionOut)
+                         ThreeDsChallenge, TransactionDetail, TransactionOut)
 from app.services import analytics
-from app.services.benchmark import (BenchmarkRefused, complete_hpp_transaction,
+from app.services.benchmark import (BenchmarkRefused, complete_pending_transaction,
                                     run_direct_transaction, start_hpp_transaction)
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 logger = get_logger(__name__)
+
+
+def _accepted_card(payload: StartTransactionRequest) -> Optional[Card]:
+    """Turn a typed card into an adapter Card, or refuse it.
+
+    Card entry is refused outright unless somebody turned it on: a PAN typed into this
+    application is card data in this application, which is a decision for whoever runs
+    the deployment and not a default. Hosted checkout never needs it — the card is
+    entered on the provider's page — so a card sent with an HPP request is rejected
+    rather than quietly ignored, since accepting it would mean receiving card data for
+    no reason at all.
+    """
+    if payload.card is None:
+        return None
+    if payload.integration_type != "direct":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Hosted checkout collects the card on the provider's own page. "
+                   "Remove the card details, or switch to Direct API.")
+    if not app_settings.allow_direct_card_entry:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Typing a card number into this application is turned off. Set "
+                   "ALLOW_DIRECT_CARD_ENTRY=true in the deployment's .env and restart "
+                   "the API to enable it — sandbox test cards only. A card token id "
+                   "works either way and is not card data.")
+    if payload.environment != "sandbox":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Card entry is only ever accepted against a sandbox environment.")
+    return Card(number=payload.card.number, month=payload.card.month,
+                year=payload.card.year, cvc=payload.card.cvc,
+                holder=payload.card.holder)
 
 
 @router.post("/start", response_model=StartTransactionResponse)
@@ -40,17 +75,24 @@ async def start_transaction(payload: StartTransactionRequest,
     target: the customer's time on the gateway's page is theirs, and the transaction
     stays PENDING until they come back.
     """
+    card = _accepted_card(payload)
     try:
         if payload.integration_type == "direct":
             transaction = await run_direct_transaction(
                 session, gateway_code=payload.gateway_code, amount=payload.amount,
                 currency=payload.currency, description=payload.description,
                 reference=payload.reference, environment=payload.environment,
-                methodology=payload.methodology, payment_mode=payload.payment_mode)
+                methodology=payload.methodology, payment_mode=payload.payment_mode,
+                card=card, token_id=payload.token_id)
+            context = transaction.context or {}
             return StartTransactionResponse(
                 transaction_id=transaction.id, status=transaction.status,
                 gateway_reference=transaction.gateway_transaction_id,
-                stored_token=(transaction.context or {}).get("stored_token"))
+                stored_token=context.get("stored_token"),
+                requires_customer_action=bool(context.get("awaiting_customer_action")),
+                redirect_url=(context.get("action_url")
+                              if context.get("awaiting_customer_action") else None),
+                mode="redirect" if context.get("awaiting_customer_action") else None)
 
         transaction, hpp = await start_hpp_transaction(
             session, gateway_code=payload.gateway_code, amount=payload.amount,
@@ -76,6 +118,10 @@ async def hpp_return(transaction_id: str, request: Request,
                      session: AsyncSession = Depends(get_session)) -> RedirectResponse:
     """Where the gateway sends the customer's browser back to.
 
+    Serves both pauses: a hosted checkout the customer has finished, and a Direct
+    payment that stopped for a 3DS challenge. Which one it is comes from the
+    transaction, so a gateway only ever has one return URL to be told about.
+
     Deliberately unauthenticated: the gateway controls this navigation and cannot
     carry a session token. It is safe because the URL only names a transaction id that
     the platform itself generated, and the only thing it does is confirm that
@@ -85,16 +131,17 @@ async def hpp_return(transaction_id: str, request: Request,
     if transaction is None:
         return RedirectResponse("/transactions?error=unknown-transaction", status_code=303)
 
-    # The RETURN_URL_RECEIVED event is recorded by complete_hpp_transaction, which
-    # knows the offset from the transaction's own start; recording it here as well
-    # would put a duplicate at offset zero, at the wrong end of the timeline.
+    # The RETURN_URL_RECEIVED event is recorded by the completion service, which knows
+    # the offset from the transaction's own start; recording it here as well would put
+    # a duplicate at offset zero, at the wrong end of the timeline.
     try:
-        await complete_hpp_transaction(session, transaction, dict(request.query_params))
+        await complete_pending_transaction(session, transaction,
+                                           dict(request.query_params))
     except Exception as exc:                              # noqa: BLE001
-        logger.warning("hpp return leg failed",
+        logger.warning("return leg failed",
                        extra={"gateway": transaction.gateway_code,
                               "transaction_id": transaction.id,
-                              "operation": "hpp_return", "status": "error",
+                              "operation": "return_leg", "status": "error",
                               "error": str(exc)[:300]})
     return RedirectResponse(f"/transactions/{transaction.id}", status_code=303)
 
@@ -129,6 +176,40 @@ async def hpp_handoff(transaction_id: str, _: User = Depends(get_current_user),
         amount=transaction.amount,
         currency=transaction.currency,
         widget=dict(context.get("adapter_context") or {}))
+
+
+@router.get("/{transaction_id}/three-ds", response_model=ThreeDsChallenge)
+async def three_ds_challenge(transaction_id: str, _: User = Depends(get_current_user),
+                             session: AsyncSession = Depends(get_session)
+                             ) -> ThreeDsChallenge:
+    """What the browser needs to put the cardholder in front of their issuer.
+
+    Returned rather than served as a page: an auto-submitting 3DS form is markup that
+    arrived from a gateway, and rendering it inside this application's own origin
+    would give somebody else's HTML this application's cookies. The front end puts it
+    in a sandboxed frame instead, where it can reach the issuer and nothing else.
+    """
+    transaction = await session.get(Transaction, transaction_id)
+    if transaction is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No such transaction.")
+    context = dict(transaction.context or {})
+    adapter_context = dict(context.get("adapter_context") or {})
+    if not context.get("awaiting_customer_action"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="That transaction is not waiting for a 3DS challenge.")
+
+    challenge_url = adapter_context.get("challenge_url")
+    challenge_html = adapter_context.get("challenge_html")
+    return ThreeDsChallenge(
+        transaction_id=transaction.id, gateway_code=transaction.gateway_code,
+        status=transaction.status,
+        mode="redirect" if challenge_url else "form",
+        challenge_url=challenge_url, challenge_html=challenge_html,
+        return_url=f"/api/v1/transactions/{transaction.id}/return",
+        amount=transaction.amount, currency=transaction.currency,
+        environment=transaction.environment)
 
 
 @router.post("/{transaction_id}/browser-metrics", response_model=Message)

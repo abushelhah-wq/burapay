@@ -139,6 +139,8 @@ export interface TransactionDetail {
   /** Present only on the transaction that minted it, for copying into Settings. */
   stored_token: string | null
   stored_token_hint: string | null
+  /** True while the payment is parked on a 3DS challenge the cardholder has not answered. */
+  awaiting_customer_action: boolean
 }
 
 export interface ComparisonRow {
@@ -316,4 +318,28 @@ export interface Page<T> {
   total: number
   limit: number
   offset: number
+}
+
+/** A 3DS challenge a Direct payment stopped on, and where to send the cardholder. */
+export interface ThreeDsChallenge {
+  transaction_id: string
+  gateway_code: string
+  status: string
+  /** `redirect` when the issuer gave a URL, `form` when it gave markup to post. */
+  mode: 'redirect' | 'form'
+  challenge_url: string | null
+  challenge_html: string | null
+  return_url: string
+  amount: number
+  currency: string
+  environment: string
+}
+
+/** A sandbox test card typed on the payment form. Never stored anywhere. */
+export interface CardEntry {
+  number: string
+  month: string
+  year: string
+  cvc: string
+  holder: string
 }

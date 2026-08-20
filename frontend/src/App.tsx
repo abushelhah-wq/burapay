@@ -14,6 +14,7 @@ import Reports from './pages/Reports'
 import RunBenchmark from './pages/RunBenchmark'
 import RunDetail from './pages/RunDetail'
 import Settings from './pages/Settings'
+import ThreeDsChallenge from './pages/ThreeDsChallenge'
 import TransactionDetail from './pages/TransactionDetail'
 import Transactions from './pages/Transactions'
 
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="transactions/:id" element={<TransactionDetail />} />
         <Route path="hpp/widget/:id" element={<HppWidget />} />
         <Route path="mock-checkout/:sessionId" element={<MockCheckout />} />
+        <Route path="three-ds/:id" element={<ThreeDsChallenge />} />
         <Route path="runs/:id" element={<RunDetail />} />
         <Route path="comparison" element={<Comparison />} />
         <Route path="comparison-tests/:id" element={<ComparisonTestDetail />} />

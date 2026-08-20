@@ -62,6 +62,23 @@ async def _test_card(session: AsyncSession) -> Card:
                 holder=str(values.get("holder", "BuraPay Benchmark")))
 
 
+#: A 3DS challenge form is a page's worth of markup at most. Anything larger is not
+#: a challenge and is not worth carrying in a transaction's context.
+CHALLENGE_HTML_LIMIT = 256_000
+
+
+def _bounded_challenge(context: Mapping[str, Any]) -> dict:
+    """Keep a challenge form to a sane size before it is stored."""
+    values = dict(context or {})
+    html = values.get("challenge_html")
+    if isinstance(html, str) and len(html) > CHALLENGE_HTML_LIMIT:
+        values["challenge_html"] = None
+        values["challenge_html_dropped"] = (
+            f"The gateway returned {len(html)} characters of challenge markup, which is "
+            "too large to be a 3DS form. It was not stored.")
+    return values
+
+
 def _guard_environment(environment: str) -> None:
     if environment != "sandbox" and not settings.allow_production_gateways:
         raise BenchmarkRefused(
@@ -185,8 +202,19 @@ async def run_direct_transaction(
         description: str = "BuraPay benchmark transaction",
         reference: Optional[str] = None, environment: str = "sandbox",
         benchmark_run_id: Optional[str] = None, methodology: str = "mixed",
-        payment_mode: str = "standard") -> Transaction:
-    """Run one Direct API transaction, start to final state, in this process."""
+        payment_mode: str = "standard", card: Optional[Card] = None,
+        token_id: Optional[str] = None) -> Transaction:
+    """Run one Direct API transaction.
+
+    Usually start to final state in this process. A gateway that stops for a 3DS
+    challenge is the exception: the transaction is left PENDING with everywhere the
+    browser needs to go in its context, exactly as HPP leg 1 does, and finishes in
+    ``complete_direct_transaction`` when the issuer sends the cardholder back.
+
+    ``card`` and ``token_id`` are what the operator entered on the payment form. With
+    neither, the test card configured on the Settings page is used, which is what an
+    automated benchmark run does.
+    """
     gateway, adapter = await _prepare(session, gateway_code, environment)
     adapter.require_supports(IntegrationType.DIRECT)
     adapter.require_supports_mode(payment_mode)
@@ -196,14 +224,15 @@ async def run_direct_transaction(
             f"{', '.join(adapter.supported_currencies) or 'not declared'}.")
 
     reference = reference or new_reference()
-    request = PaymentRequest(
-        amount=amount, currency=currency.upper(), reference=reference,
-        description=description,
-        return_url=f"{settings.public_base_url}/api/v1/transactions/return/{gateway_code}",
-        webhook_url=f"{settings.public_base_url}/api/webhooks/{gateway_code}",
-        payment_mode=payment_mode,
+    if payment_mode == "token":
         # A stored-token charge sends no card details at all — that is the point of it.
-        card=None if payment_mode == "token" else await _test_card(session))
+        payment_card: Optional[Card] = None
+    elif card is not None or token_id:
+        # The operator supplied one or the other on the payment form. A supplied token
+        # means deliberately not typing a card, so no test card is substituted.
+        payment_card = card
+    else:
+        payment_card = await _test_card(session)
 
     transaction = Transaction(
         benchmark_run_id=benchmark_run_id, gateway_id=gateway.id, gateway_code=gateway.code,
@@ -213,6 +242,15 @@ async def run_direct_transaction(
         status=TransactionStatus.IN_PROGRESS.value, methodology=methodology)
     session.add(transaction)
     await session.flush()          # id is needed before the flow starts
+
+    # Built after the flush because a 3DS challenge sends the cardholder back to this
+    # transaction's own return leg, and that needs the id.
+    request = PaymentRequest(
+        amount=amount, currency=currency.upper(), reference=reference,
+        description=description,
+        return_url=f"{settings.public_base_url}/api/v1/transactions/{transaction.id}/return",
+        webhook_url=f"{settings.public_base_url}/api/webhooks/{gateway_code}",
+        payment_mode=payment_mode, card=payment_card, token_id=token_id)
 
     timer = TransactionTimer()
     transaction.started_at = timer.started_at
@@ -237,6 +275,38 @@ async def run_direct_transaction(
                 timer.mark_at(TimelineEvent.THREE_DS_COMPLETED,
                               offset + sum(m.duration_ms for m in auth_calls),
                               timestamp=last.completed_at or last.started_at)
+        if result.requires_customer_action:
+            # The issuer wants the cardholder. Stop the clock on the gateway's share
+            # here; everything from now until they come back is their time.
+            timer.mark(TimelineEvent.REDIRECT_INITIATED,
+                       label="3DS challenge; awaiting the cardholder")
+            _apply_result(transaction, result)
+            total_ms = timer.elapsed_ms()
+            transaction.context = sanitize({
+                "adapter_context": _bounded_challenge(result.context),
+                "return_url": request.return_url,
+                "webhook_url": request.webhook_url,
+                # Where to send the browser. A gateway that only handed back an
+                # auto-submitting form gets our own challenge page, which renders it.
+                "action_url": result.action_url or f"/three-ds/{transaction.id}",
+                "awaiting_customer_action": True,
+                # Leg 1's own numbers, so the resume leg adds to them rather than
+                # overwriting them — the same arrangement HPP uses.
+                "leg1_gateway_api_time_ms": client.gateway_api_time_ms,
+                "leg1_elapsed_ms": total_ms,
+                "leg1_sequence": len(client.measurements),
+            })
+            _apply_timings(transaction, timer, client, total_ms=total_ms)
+            transaction.total_duration_ms = None   # not final until the customer returns
+            await _persist_measurements(session, transaction, client)
+            await _persist_events(session, transaction, timer)
+            await session.commit()
+            await session.refresh(transaction)
+            logger.info("direct transaction paused for 3DS",
+                        extra={"gateway": gateway_code, "transaction_id": transaction.id,
+                               "operation": "direct_payment", "status": "pending"})
+            return transaction
+
         timer.mark(TimelineEvent.AUTHORIZATION_RESPONSE)
         _apply_result(transaction, result)
         if result.stored_token:
@@ -365,13 +435,15 @@ async def start_hpp_transaction(
     return transaction, hpp
 
 
-# --------------------------------------------------------------------------- #
-# HPP — leg 2
-# --------------------------------------------------------------------------- #
+async def _complete_second_leg(
+        session: AsyncSession, transaction: Transaction, params: Mapping[str, str], *,
+        confirm, operation: str) -> Transaction:
+    """Finish a transaction that paused for the customer, and add the two legs up.
 
-async def complete_hpp_transaction(session: AsyncSession, transaction: Transaction,
-                                   params: Mapping[str, str]) -> Transaction:
-    """Confirm the outcome after the customer returns from the gateway's page.
+    Shared by hosted checkout — where the customer spent the pause on the gateway's
+    own page — and by a Direct payment that stopped for a 3DS challenge. The shape is
+    the same in both cases and so is the rule that matters: the pause belongs to the
+    customer and never to the gateway's API time.
 
     Offsets here are computed from the persisted ``started_at`` rather than from a
     fresh monotonic origin, because this runs in a different request from leg 1. The
@@ -390,7 +462,8 @@ async def complete_hpp_transaction(session: AsyncSession, transaction: Transacti
         reference=transaction.merchant_reference,
         description=transaction.description or "",
         return_url=context.get("return_url", ""),
-        webhook_url=context.get("webhook_url", ""))
+        webhook_url=context.get("webhook_url", ""),
+        payment_mode=transaction.payment_mode or "standard")
 
     started_at = transaction.started_at
     if started_at.tzinfo is None:
@@ -403,9 +476,17 @@ async def complete_hpp_transaction(session: AsyncSession, transaction: Transacti
 
     client = adapter.build_client(settings.http_timeout_seconds)
     confirm_started = time.perf_counter()
+    # Whatever happens next, the customer is no longer being waited on. Leaving this
+    # set would keep offering a "continue verification" route into a finished payment.
+    context.pop("awaiting_customer_action", None)
+    transaction.context = context
+
     try:
-        result = await adapter.confirm_hpp_payment(client, request, adapter_context, params)
+        result = await confirm(adapter, client, request, adapter_context)
         _apply_result(transaction, result)
+        if result.stored_token:
+            transaction.context = {**context, "stored_token": result.stored_token,
+                                   "stored_token_hint": result.stored_token_hint}
         timer.mark_at(TimelineEvent.FINAL_STATUS_CONFIRMED,
                       return_offset_ms + (time.perf_counter() - confirm_started) * 1000.0,
                       status=result.status.value)
@@ -413,13 +494,13 @@ async def complete_hpp_transaction(session: AsyncSession, transaction: Transacti
         timer.mark_at(TimelineEvent.ERROR,
                       return_offset_ms + (time.perf_counter() - confirm_started) * 1000.0,
                       label=type(exc).__name__)
-        _apply_failure(transaction, exc, transaction.gateway_code, "confirm_hpp_payment")
+        _apply_failure(transaction, exc, transaction.gateway_code, operation)
     finally:
         await client.client.aclose()
 
     transaction.completed_at = datetime.now(timezone.utc)
     # Leg 1 and leg 2 are added together: the gateway's API contribution is both legs,
-    # and the customer's time on the hosted page is neither.
+    # and the customer's time in between is neither.
     leg1_api_ms = float(context.get("leg1_gateway_api_time_ms") or 0.0)
     transaction.gateway_api_time_ms = round(leg1_api_ms + client.gateway_api_time_ms, 3)
     transaction.total_duration_ms = round(
@@ -427,8 +508,8 @@ async def complete_hpp_transaction(session: AsyncSession, transaction: Transacti
     transaction.api_call_count = (
         (transaction.api_call_count or 0) + len(client.timed_measurements))
 
-    # Everything between leg 1's redirect and the customer's return that was not a
-    # gateway call is time the customer spent on the gateway's page.
+    # Everything between leg 1 handing over to the browser and the customer's return
+    # that was not a gateway call is time the customer spent.
     leg1_elapsed = float(context.get("leg1_elapsed_ms") or 0.0)
     interaction = return_offset_ms - leg1_elapsed
     transaction.customer_interaction_time_ms = round(interaction, 3) if interaction > 0 else None
@@ -449,10 +530,55 @@ async def complete_hpp_transaction(session: AsyncSession, transaction: Transacti
     await session.commit()
     await session.refresh(transaction)
 
-    logger.info("hpp transaction complete",
+    logger.info("pending transaction completed",
                 extra={"gateway": transaction.gateway_code,
-                       "transaction_id": transaction.id, "operation": "confirm_hpp",
+                       "transaction_id": transaction.id, "operation": operation,
                        "duration_ms": transaction.total_duration_ms,
                        "gateway_api_time_ms": transaction.gateway_api_time_ms,
                        "status": transaction.status})
     return transaction
+
+
+# --------------------------------------------------------------------------- #
+# HPP — leg 2
+# --------------------------------------------------------------------------- #
+
+async def complete_hpp_transaction(session: AsyncSession, transaction: Transaction,
+                                   params: Mapping[str, str]) -> Transaction:
+    """Confirm the outcome after the customer returns from the gateway's page."""
+
+    async def confirm(adapter, client, request, adapter_context) -> PaymentResult:
+        return await adapter.confirm_hpp_payment(client, request, adapter_context, params)
+
+    return await _complete_second_leg(session, transaction, params, confirm=confirm,
+                                      operation="confirm_hpp_payment")
+
+
+# --------------------------------------------------------------------------- #
+# Direct API — the 3DS resume leg
+# --------------------------------------------------------------------------- #
+
+async def complete_direct_transaction(session: AsyncSession, transaction: Transaction,
+                                      params: Mapping[str, str]) -> Transaction:
+    """Finish a Direct payment after the cardholder completed the 3DS challenge.
+
+    Only the authorisation call the adapter still had to make is timed. The OTP, the
+    issuer's page and the round trip through the browser were the customer's, and land
+    in ``customer_interaction_time_ms`` where they cannot flatter or penalise the
+    gateway's API numbers.
+    """
+
+    async def confirm(adapter, client, request, adapter_context) -> PaymentResult:
+        return await adapter.complete_direct_payment(client, request, adapter_context,
+                                                     params)
+
+    return await _complete_second_leg(session, transaction, params, confirm=confirm,
+                                      operation="complete_direct_payment")
+
+
+async def complete_pending_transaction(session: AsyncSession, transaction: Transaction,
+                                       params: Mapping[str, str]) -> Transaction:
+    """Resume whichever kind of pause this transaction is sitting in."""
+    if transaction.integration_type == IntegrationType.DIRECT.value:
+        return await complete_direct_transaction(session, transaction, params)
+    return await complete_hpp_transaction(session, transaction, params)

@@ -371,6 +371,48 @@ created it, and copied across on purpose.
 All four tokenisation fields are optional. Geidea works for ordinary card payments with
 none of them set.
 
+### Paying by Direct API: what to enter, and where
+
+Geidea's Direct API authenticates and pays against a **card token**, never against a
+card number. Hand Initiate Authentication a card and it answers `responseCode=100`
+"General error" with `detailedResponseCode=069` — *Missing Token Id*. So the adapter
+exchanges a typed card for a token first, on `POST /pgw/api/v1/direct/tokenize`, and
+every call after that carries the token:
+
+    session -> tokenize -> initiate authentication -> authenticate payer -> pay
+
+The PAN therefore appears on exactly one call, and on none at all if you supply a token
+instead. That tokenize call is **timed, not treated as setup**: it is a round trip the
+payment genuinely cannot happen without on this gateway, and hiding it would flatter
+Geidea against gateways that accept a card on the authorisation call itself.
+
+**Run Benchmark → Direct API** now has a *Payment details* step with two ways to pay:
+
+* **Card token ID** — always available. A token is not card data, so this works even on
+  an account that is not cleared to receive card numbers, which most sandbox accounts
+  are not. A **Store card (tokenize)** payment mints one.
+* **Card details** — a sandbox test card, typed in. Only shown when
+  `ALLOW_DIRECT_CARD_ENTRY=true`; see [Card entry](#card-entry) below.
+
+Leave both blank and the test card from **Settings** is used, which is what an
+automated benchmark run does.
+
+### 3-D Secure: the payment stops for the cardholder
+
+When the issuer wants a challenge, a Direct payment cannot finish server-side, so it
+does not pretend to. The adapter returns after Authenticate Payer, the transaction stays
+`PENDING`, and the browser is sent to the challenge — either the URL the issuer gave, or
+its auto-submitting form rendered in a sandboxed iframe on `/three-ds/{id}`. A sandboxed
+frame is its own opaque origin: the issuer's markup can post itself and navigate, and it
+cannot read this application's DOM, storage or session.
+
+The issuer returns the cardholder to `/api/v1/transactions/{id}/return` — the same
+return leg hosted checkout uses — and the server runs the Pay call and records the final
+status. **Only the two server legs count as gateway API time.** The OTP, the issuer's
+page and the round trip through the browser land in `customer_interaction_time_ms`,
+where they can neither flatter nor penalise the gateway. A payment left waiting shows a
+*Continue verification* link on its transaction page.
+
 ---
 
 ## Adding a new payment gateway
@@ -578,11 +620,33 @@ decrypted with anything else. Back the key up separately, and not on the same se
   redacts secrets by field name and truncates anything that passes a Luhn check to its
   last four digits — including card numbers that appear inside a free-text error
   message.
-* **No cardholder data is stored.** No PAN, no CVV, no track data. The sandbox test
-  card lives in application settings, exists in memory for the length of one request,
-  and is never written against a transaction.
+* **No cardholder data is stored.** No PAN, no CVV, no track data. A card — whether
+  typed on the payment form or read from application settings — exists in memory for
+  the length of one request and is never written against a transaction.
 * HPP flows redirect to the provider's own page. Direct API flows use tokenization
   where the provider offers it.
+
+<a id="card-entry"></a>
+### Card entry
+
+`ALLOW_DIRECT_CARD_ENTRY` defaults to `false`, and with it off the API **rejects** a
+request carrying card details rather than quietly ignoring it. A card number typed into
+a web application is card data held by that application, which is a decision for whoever
+runs the deployment rather than a default.
+
+To turn it on — sandbox test cards only:
+
+```bash
+# on the VPS, in the deployment's .env
+ALLOW_DIRECT_CARD_ENTRY=true
+docker compose up -d --build api
+```
+
+A **Card token ID** needs no such permission and is offered either way: a token is not
+card data, and it is the only way to run a Direct payment on an account that cannot
+receive raw card numbers. Card details are also refused outright on a hosted-checkout
+request, where the provider's own page collects them — accepting one there would mean
+receiving card data for no reason at all.
 * Passwords are hashed with bcrypt. Sessions are short-lived HS256 JWTs carrying only
   a user id, email and role.
 * `.env` is git-ignored. No TLS private key or certificate is stored in this

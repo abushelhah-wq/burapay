@@ -249,6 +249,114 @@ class TestTransactionLifecycle:
         assert response.status_code == 400
         assert "not configured" in response.json()["message"].lower()
 
+    async def test_typing_a_card_is_refused_until_it_is_turned_on(
+            self, client: AsyncClient, auth_headers: dict):
+        """Section 25: a PAN typed into this application is a deliberate choice."""
+        await configure_mockpay(client, auth_headers)
+        response = await client.post("/v1/transactions/start", headers=auth_headers, json={
+            "gateway_code": "mockpay", "integration_type": "direct",
+            "amount": 1.0, "currency": "SAR",
+            "card": {"number": "4111 1111 1111 1111", "month": "12", "year": "30",
+                     "cvc": "123"}})
+        assert response.status_code == 400
+        assert "ALLOW_DIRECT_CARD_ENTRY" in response.json()["message"]
+
+    async def test_a_card_is_accepted_once_it_is_turned_on(
+            self, client: AsyncClient, auth_headers: dict, monkeypatch):
+        from app.core.config import settings as app_settings
+        monkeypatch.setattr(app_settings, "allow_direct_card_entry", True)
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(
+            client, auth_headers,
+            card={"number": "4111111111111111", "month": "12", "year": "2030",
+                  "cvc": "123", "holder": "Test Person"})
+
+        detail = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                   headers=auth_headers)).json()
+        # Whatever else happens, the card must not be anywhere in what was stored.
+        assert "4111111111111111" not in json.dumps(detail)
+        assert "123" not in json.dumps(detail.get("transaction", {}).get("context") or {})
+
+    async def test_a_card_sent_with_hosted_checkout_is_refused_not_ignored(
+            self, client: AsyncClient, auth_headers: dict, monkeypatch):
+        """The provider's page collects it. Accepting one here would be card data for nothing."""
+        from app.core.config import settings as app_settings
+        monkeypatch.setattr(app_settings, "allow_direct_card_entry", True)
+        await configure_mockpay(client, auth_headers)
+        response = await client.post("/v1/transactions/start", headers=auth_headers, json={
+            "gateway_code": "mockpay", "integration_type": "hpp",
+            "amount": 1.0, "currency": "SAR",
+            "card": {"number": "4111111111111111", "month": "12", "year": "30",
+                     "cvc": "123"}})
+        assert response.status_code == 400
+        assert "provider's own page" in response.json()["message"]
+
+    async def test_a_token_id_needs_no_permission(self, client: AsyncClient,
+                                                  auth_headers: dict):
+        """A token is not card data, so it works without turning card entry on."""
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers, token_id="tok_abc")
+        assert started["status"] in ("SUCCESS", "PENDING")
+
+    async def test_the_transaction_page_carries_the_token_and_pause_fields(
+            self, client: AsyncClient, auth_headers: dict):
+        """The response model has to declare them, or they are filtered out on the way past."""
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers)
+        detail = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                   headers=auth_headers)).json()
+        assert "stored_token" in detail
+        assert "stored_token_hint" in detail
+        assert detail["awaiting_customer_action"] is False
+
+    async def test_a_3ds_challenge_pauses_the_payment_and_resumes_on_return(
+            self, client: AsyncClient, auth_headers: dict):
+        """The whole two-legged Direct flow: pause for the cardholder, then finish.
+
+        What matters is where the waiting lands. The customer's time must show up as
+        customer interaction and must not be added to the gateway's API time.
+        """
+        await configure_mockpay(client, auth_headers, scenario="three_ds_challenge")
+        started = await run_transaction(client, auth_headers)
+        assert started["status"] == "PENDING"
+        assert started["requires_customer_action"] is True
+        assert started["redirect_url"]
+
+        paused = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                   headers=auth_headers)).json()
+        assert paused["awaiting_customer_action"] is True
+        assert paused["transaction"]["total_duration_ms"] is None
+
+        leg1_api_ms = paused["transaction"]["gateway_api_time_ms"]
+
+        # The issuer sends the browser back. That leg is unauthenticated by design.
+        response = await client.get(
+            f"/v1/transactions/{started['transaction_id']}/return",
+            follow_redirects=False)
+        assert response.status_code == 303
+
+        detail = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                   headers=auth_headers)).json()
+        transaction = detail["transaction"]
+        assert transaction["status"] == "SUCCESS"
+        assert transaction["total_duration_ms"] is not None
+        # Both legs' calls count toward the gateway; the wait between them does not.
+        assert transaction["gateway_api_time_ms"] > leg1_api_ms
+        assert (transaction["gateway_api_time_ms"]
+                < transaction["total_duration_ms"])
+        assert transaction["api_call_count"] == 3
+        # The pause is over: nothing should keep offering a way back into it.
+        assert detail["awaiting_customer_action"] is False
+
+    async def test_the_3ds_endpoint_refuses_a_transaction_that_is_not_waiting(
+            self, client: AsyncClient, auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers)
+        response = await client.get(
+            f"/v1/transactions/{started['transaction_id']}/three-ds", headers=auth_headers)
+        assert response.status_code == 400
+        assert "not waiting" in response.json()["message"].lower()
+
     async def test_unsupported_currency_is_refused(self, client: AsyncClient,
                                                    auth_headers: dict):
         await client.put("/v1/gateways/moyasar/credentials", headers=auth_headers, json={

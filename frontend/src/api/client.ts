@@ -9,7 +9,8 @@
 
 import type {
   AppSettings, BenchmarkRun, ComparisonRow, ComparisonTest, Dashboard, Gateway,
-  GatewayHealth, HppRow, Page, Ranking, Transaction, TransactionDetail, User,
+  GatewayHealth, HppRow, Page, Ranking, ThreeDsChallenge, Transaction, TransactionDetail,
+  User,
 } from './types'
 
 const BASE = '/api'
@@ -146,8 +147,11 @@ export const api = {
   // -- transactions ----------------------------------------------------- //
   startTransaction: (payload: Record<string, unknown>) =>
     request<{ transaction_id: string; status: string; redirect_url: string | null;
-      mode: string | null; gateway_reference: string | null }>(
+      mode: string | null; gateway_reference: string | null;
+      stored_token: string | null; requires_customer_action: boolean }>(
       '/v1/transactions/start', { method: 'POST', body: JSON.stringify(payload) }),
+  threeDsChallenge: (id: string) =>
+    request<ThreeDsChallenge>(`/v1/transactions/${id}/three-ds`),
   transactions: (filters: TransactionFilters = {}) =>
     request<Page<Transaction>>(`/v1/transactions${query(filters as Record<string, unknown>)}`),
   transaction: (id: string) => request<TransactionDetail>(`/v1/transactions/${id}`),

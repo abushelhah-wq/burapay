@@ -5,9 +5,44 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas.common import ORMModel
+
+
+class CardIn(BaseModel):
+    """A sandbox test card typed on the payment form.
+
+    Held in memory for the duration of one request and never written anywhere: not to
+    the database, not to a log, not into a stored response snippet (specification
+    section 25). The sanitizer truncates any PAN that reaches a log regardless, and
+    the CVV is dropped outright. Accepting this at all requires
+    ``ALLOW_DIRECT_CARD_ENTRY`` — typing a card number into a web application puts it
+    in PCI scope, so it is off unless somebody deliberately turns it on.
+    """
+
+    number: str = Field(min_length=12, max_length=25,
+                        description="Sandbox test card number. Spaces are stripped.")
+    month: str = Field(min_length=1, max_length=2)
+    year: str = Field(min_length=2, max_length=4)
+    cvc: str = Field(min_length=3, max_length=4)
+    holder: str = Field(default="BuraPay Benchmark", max_length=100)
+
+    @field_validator("number")
+    @classmethod
+    def _digits_only(cls, value: str) -> str:
+        digits = "".join(ch for ch in value if ch.isdigit())
+        if not 12 <= len(digits) <= 19:
+            raise ValueError("A card number is 12 to 19 digits.")
+        return digits
+
+    @field_validator("month", "year", "cvc")
+    @classmethod
+    def _numeric(cls, value: str) -> str:
+        value = value.strip()
+        if not value.isdigit():
+            raise ValueError("Expected digits only.")
+        return value
 
 
 class StartTransactionRequest(BaseModel):
@@ -26,6 +61,14 @@ class StartTransactionRequest(BaseModel):
     #: a stored-token payment charges a card the gateway already holds.
     payment_mode: str = Field(default="standard",
                               pattern="^(standard|store_card|token)$")
+    #: The card the operator typed on the payment form. Rejected unless
+    #: ``ALLOW_DIRECT_CARD_ENTRY`` is on, and ignored for hosted checkout, where the
+    #: card is entered on the provider's own page and never reaches this application.
+    card: Optional[CardIn] = None
+    #: A card token to authenticate and charge instead of a card number. Always
+    #: accepted — a token is not card data — and the only way to run a Direct payment
+    #: on an account that is not cleared to receive raw card numbers.
+    token_id: Optional[str] = Field(default=None, max_length=200)
 
 
 class StartTransactionResponse(BaseModel):
@@ -40,6 +83,9 @@ class StartTransactionResponse(BaseModel):
     #: Present when a Store card payment minted one. Shown once, for copying into the
     #: gateway's settings.
     stored_token: Optional[str] = None
+    #: True when a Direct payment stopped for a 3DS challenge. ``redirect_url`` then
+    #: says where to send the cardholder, exactly as it does for hosted checkout.
+    requires_customer_action: bool = False
 
 
 class BenchmarkRunCreate(BaseModel):
@@ -198,6 +244,14 @@ class TransactionDetail(BaseModel):
     gateway_api_time_ms: float = 0.0
     setup_call_time_ms: float = 0.0
     documented_calls: Optional[str] = None
+    #: A card token this payment minted. Shown once, on the transaction that created
+    #: it, for copying into the gateway's settings — never stored there automatically,
+    #: because a card token belongs to a cardholder rather than to the merchant.
+    stored_token: Optional[str] = None
+    stored_token_hint: Optional[str] = None
+    #: True while the payment is parked on a 3DS challenge, so the page can offer a way
+    #: back into it instead of showing a PENDING row with no explanation.
+    awaiting_customer_action: bool = False
 
 
 class HppHandoff(BaseModel):
@@ -222,6 +276,29 @@ class HppHandoff(BaseModel):
     #: Gateway-specific parameters for the SDK, e.g. ``session_id`` and
     #: ``session_data`` for Adyen, ``checkout_id`` for HyperPay.
     widget: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ThreeDsChallenge(BaseModel):
+    """What the browser needs to put the cardholder in front of their issuer.
+
+    Either a URL to navigate to, or an auto-submitting form the issuer wants posted.
+    The form is rendered in a sandboxed frame rather than injected into the page: it
+    is markup this application received from somewhere else, and it belongs in its own
+    origin, not in ours.
+    """
+
+    transaction_id: str
+    gateway_code: str
+    status: str
+    #: ``redirect`` when the issuer gave a URL, ``form`` when it gave markup to post.
+    mode: str = Field(pattern="^(redirect|form)$")
+    challenge_url: Optional[str] = None
+    challenge_html: Optional[str] = None
+    #: Where the issuer sends the cardholder afterwards, and where the payment resumes.
+    return_url: str
+    amount: float
+    currency: str
+    environment: str
 
 
 class BrowserMetricsIn(BaseModel):

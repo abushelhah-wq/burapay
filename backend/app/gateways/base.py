@@ -75,6 +75,9 @@ class PaymentRequest:
     return_url: str = ""
     webhook_url: str = ""
     card: Optional[Card] = None
+    #: A card the gateway already holds, when the flow charges a token rather than a
+    #: PAN. Geidea's Direct API requires one on its authentication step.
+    token_id: Optional[str] = None
     #: standard | store_card | token. Adapters that declare only "standard" can
     #: ignore it.
     payment_mode: str = "standard"
@@ -106,6 +109,13 @@ class PaymentResult:
     gateway_code: Optional[str] = None
     gateway_message: Optional[str] = None
     three_ds_required: bool = False
+    #: Set when the payment cannot finish server-side because the cardholder has to do
+    #: something — a 3DS challenge, an OTP. The browser is sent to ``action_url`` and
+    #: the flow resumes through the adapter's ``complete_direct_payment`` when the
+    #: issuer sends it back. The time in between is the customer's, and is recorded as
+    #: customer interaction rather than gateway latency.
+    requires_customer_action: bool = False
+    action_url: Optional[str] = None
     context: Dict[str, Any] = field(default_factory=dict)
     raw: Dict[str, Any] = field(default_factory=dict)
     #: A card token the gateway minted during this payment. Surfaced so it can be
@@ -250,6 +260,18 @@ class PaymentGatewayAdapter:
         if integration is IntegrationType.HPP:
             return await self.create_hpp_session(client, request)
         return await self.process_direct_payment(client, request)
+
+    async def complete_direct_payment(self, client: InstrumentedClient,
+                                      request: PaymentRequest,
+                                      context: Mapping[str, Any],
+                                      params: Mapping[str, str]) -> PaymentResult:
+        """Finish a Direct payment that paused for a 3DS challenge.
+
+        Only called for a result that set ``requires_customer_action``. Adapters whose
+        Direct flow always completes server-side never need it.
+        """
+        raise NotSupported(
+            f"{self.display_name}: this Direct flow does not pause for customer action.")
 
     async def get_payment_status(self, client: InstrumentedClient,
                                  payment_id: str) -> PaymentResult:

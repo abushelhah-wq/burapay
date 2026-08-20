@@ -113,7 +113,11 @@ export default function TransactionDetail() {
           <p className="mt-2 text-3xl font-semibold tabular text-ink-900">
             {ms(transaction.customer_interaction_time_ms)}
           </p>
-          <p className="mt-1 text-xs text-ink-500">time spent on the hosted page</p>
+          <p className="mt-1 text-xs text-ink-500">
+            {transaction.integration_type === 'hpp'
+              ? 'time spent on the hosted page'
+              : 'time spent verifying with the issuer'}
+          </p>
         </div>
         <div className="card p-5">
           <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">
@@ -134,6 +138,19 @@ export default function TransactionDetail() {
         score. Only the first is the gateway’s API latency; the customer’s time on a
         hosted page is not something a gateway can be faster at.
       </Note>
+
+      {detail.awaiting_customer_action && (
+        <Card title="Waiting for the cardholder">
+          <p className="text-sm text-ink-700">
+            This payment stopped for a 3-D Secure challenge. It stays pending until the
+            cardholder verifies with their bank and is sent back, and the time in
+            between is recorded as customer interaction rather than gateway latency.
+          </p>
+          <Link to={`/three-ds/${transaction.id}`} className="btn-primary mt-3 inline-flex">
+            Continue verification
+          </Link>
+        </Card>
+      )}
 
       {detail.stored_token && (
         <Card title="Card token">

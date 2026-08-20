@@ -44,6 +44,14 @@ export default function RunBenchmark() {
   const [transactionCount, setTransactionCount] = useState(20)
   const [interval, setInterval] = useState(2)
   const [runName, setRunName] = useState('')
+  // The payment form. Only ever a sandbox test card, only ever held here in the
+  // browser and in one server request — nothing about it is saved anywhere.
+  const [cardNumber, setCardNumber] = useState('')
+  const [cardMonth, setCardMonth] = useState('')
+  const [cardYear, setCardYear] = useState('')
+  const [cardCvc, setCardCvc] = useState('')
+  const [cardHolder, setCardHolder] = useState('BuraPay Benchmark')
+  const [tokenId, setTokenId] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
@@ -86,6 +94,11 @@ export default function RunBenchmark() {
   if (!gateways || !settings || !limits) return <Spinner label="Loading gateways" />
 
   const usable = gateways.filter((item) => item.enabled)
+  const cardEntryAllowed = settings.environment.allow_direct_card_entry
+  const cardEntered = Boolean(cardNumber.trim() && cardMonth.trim() && cardYear.trim()
+    && cardCvc.trim())
+  // A Store card run has to see a card: there is nothing to store otherwise.
+  const cardModeNeedsInput = paymentMode === 'store_card'
   const currencyUnsupported = Boolean(
     selected && selected.supported_currencies.length &&
     !selected.supported_currencies.includes(currency))
@@ -96,7 +109,26 @@ export default function RunBenchmark() {
       amount: Number(amount), currency, description,
       reference: reference || undefined, methodology,
       payment_mode: integration === 'direct' ? paymentMode : 'standard',
+      // Card details go to Direct API and nowhere else: a hosted checkout collects
+      // them on the provider's own page, and sending them here would be card data
+      // this application had no reason to receive.
+      card: integration === 'direct' && cardEntered ? {
+        number: cardNumber, month: cardMonth, year: cardYear,
+        cvc: cardCvc, holder: cardHolder || 'BuraPay Benchmark',
+      } : undefined,
+      token_id: integration === 'direct' && tokenId.trim() ? tokenId.trim() : undefined,
     })
+    if (result.requires_customer_action && result.redirect_url) {
+      // The issuer wants the cardholder — a 3DS challenge or an OTP. Everything from
+      // here until they come back is their time, and is recorded as such.
+      markRedirect(result.transaction_id)
+      if (result.redirect_url.startsWith('http')) {
+        window.location.href = result.redirect_url
+      } else {
+        navigate(result.redirect_url)
+      }
+      return
+    }
     if (result.mode === 'widget') {
       // The gateway returned an identifier for its own browser component rather than
       // a URL. Mount it in our own page; the customer never leaves this origin.
@@ -334,8 +366,121 @@ export default function RunBenchmark() {
           )}
         </Card>
 
-        {/* Step 3 — transaction details */}
-        <Card title="3 · Transaction details">
+        {/* Step 3 — payment details, for the integration that needs them */}
+        {mode === 'single' && integration === 'direct' && paymentMode !== 'token' && (
+          <Card title="3 · Payment details">
+            <p className="text-sm text-ink-500">
+              Direct API sends the payment server-to-server, so this application has to
+              be given something to charge. Either works: a sandbox test card, or a card
+              token the gateway already holds.
+            </p>
+
+            <div className="mt-5">
+              <label className="label" htmlFor="token_id">Card token ID</label>
+              <input id="token_id" className="input font-mono" value={tokenId}
+                     autoComplete="off"
+                     placeholder="Paste a token to pay without entering a card"
+                     onChange={(e) => setTokenId(e.target.value)} />
+              <p className="hint">
+                A token is not card data, so this always works — including on an account
+                that is not cleared to receive card numbers. A{' '}
+                <strong>Store card (tokenize)</strong> payment mints one, and it is shown
+                on that transaction’s page.
+              </p>
+            </div>
+
+            <div className="mt-6 border-t border-ink-200 pt-6">
+              <div className="flex items-center justify-between gap-3">
+                <p className="label mb-0">Card details</p>
+                <Badge tone={cardEntryAllowed ? 'warn' : 'neutral'}>
+                  {cardEntryAllowed ? 'sandbox test cards only' : 'turned off'}
+                </Badge>
+              </div>
+
+              {!cardEntryAllowed ? (
+                <div className="mt-3 rounded-lg border border-ink-200 bg-ink-50 p-4
+                                text-sm text-ink-600">
+                  <p>
+                    Typing a card number into this application is off. A PAN entered here
+                    is card data held by this application, which is a decision for whoever
+                    runs the deployment rather than a default.
+                  </p>
+                  <p className="mt-2">
+                    To turn it on, set{' '}
+                    <span className="font-mono text-xs">ALLOW_DIRECT_CARD_ENTRY=true</span>{' '}
+                    in the deployment’s <span className="font-mono text-xs">.env</span> and
+                    restart the API. Until then, paste a card token above, or use{' '}
+                    <strong>{integrationLabel('hpp')}</strong>, where the card is entered on
+                    the provider’s own page and never reaches this application at all.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <div className="mt-3 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                    <div className="sm:col-span-2">
+                      <label className="label" htmlFor="card_number">Card number</label>
+                      <input id="card_number" className="input font-mono" inputMode="numeric"
+                             autoComplete="off" value={cardNumber}
+                             placeholder="4111 1111 1111 1111"
+                             onChange={(e) => setCardNumber(e.target.value)} />
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="card_expiry">Expiry</label>
+                      <div className="flex gap-2">
+                        <input id="card_expiry" className="input" inputMode="numeric"
+                               autoComplete="off" maxLength={2} placeholder="MM"
+                               value={cardMonth}
+                               onChange={(e) => setCardMonth(e.target.value)} />
+                        <input className="input" inputMode="numeric" autoComplete="off"
+                               maxLength={4} placeholder="YYYY" value={cardYear}
+                               aria-label="Expiry year"
+                               onChange={(e) => setCardYear(e.target.value)} />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="label" htmlFor="card_cvc">CVV</label>
+                      <input id="card_cvc" className="input" inputMode="numeric"
+                             autoComplete="off" maxLength={4} placeholder="123"
+                             value={cardCvc}
+                             onChange={(e) => setCardCvc(e.target.value)} />
+                    </div>
+                    <div className="sm:col-span-2">
+                      <label className="label" htmlFor="card_holder">Cardholder name</label>
+                      <input id="card_holder" className="input" autoComplete="off"
+                             value={cardHolder}
+                             onChange={(e) => setCardHolder(e.target.value)} />
+                    </div>
+                  </div>
+                  <p className="hint mt-3">
+                    Sandbox test cards only. Nothing entered here is stored: the number
+                    goes to the gateway on this one request, the CVV is dropped before
+                    anything is written down, and any card number that reaches a log is
+                    truncated to its last four digits.
+                  </p>
+                </>
+              )}
+
+              {!cardEntered && !tokenId.trim() && (
+                <p className="mt-3 text-xs text-ink-500">
+                  Leave both blank and the test card from{' '}
+                  <Link to="/settings" className="font-medium underline">Settings</Link>{' '}
+                  is used, which is what an automated benchmark run does.
+                </p>
+              )}
+              {cardModeNeedsInput && !cardEntered && (
+                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3
+                              text-xs text-amber-800">
+                  A <strong>Store card (tokenize)</strong> payment stores the card it is
+                  given. The configured test card will be used unless you enter one here.
+                </p>
+              )}
+            </div>
+          </Card>
+        )}
+
+        {/* Step 4 — transaction details */}
+        <Card title={mode === 'single' && integration === 'direct' && paymentMode !== 'token'
+                       ? '4 · Transaction details' : '3 · Transaction details'}>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <div>
               <label className="label" htmlFor="amount">Amount</label>

@@ -19,15 +19,34 @@ HPP — 2 calls::
     POST /payment-intent/api/v2/direct/session
     GET  /pgw/api/v1/direct/order/{orderId}
 
-Direct API — 4 calls, documented as fixed regardless of the 3DS outcome::
+Direct API — the authentication and payment calls address a **card token**, not a
+PAN. Sending card details to Initiate Authentication is answered with
+``responseCode=100`` / ``detailedResponseCode=069 "Missing Token Id"``, which is what
+this sequence is built around::
 
     POST /payment-intent/api/v2/direct/session
+    POST /pgw/api/v1/direct/tokenize            (skipped when a token id is supplied)
     POST /pgw/api/v6/direct/authenticate/initiate
     POST /pgw/api/v6/direct/authenticate/payer
     POST /pgw/api/v2/direct/pay
 
-Two details need confirming against a live sandbox
---------------------------------------------------
+The PAN therefore appears on exactly one call — tokenization — and never again.
+Supply ``token_id`` on the request instead and the PAN never appears at all: the
+adapter goes straight to Initiate Authentication with the token.
+
+Authenticate Payer is where a 3DS challenge surfaces. When the response carries
+somewhere to send the cardholder — a URL, or an auto-submitting form — the adapter
+stops and returns ``requires_customer_action``. The customer does the OTP, the issuer
+returns them to ``return_url``, and ``complete_direct_payment`` runs the Pay call. The
+time in between is customer interaction time, not gateway latency.
+
+Three details need confirming against a live sandbox
+----------------------------------------------------
+* **Server-side tokenization.** Geidea's own hosted script tokenizes in the browser so
+  the merchant never touches a PAN, which is the arrangement most accounts are set up
+  for. The server-side tokenize endpoint is only available to accounts cleared to
+  receive raw card numbers. Its path is configurable (``tokenize_path``) and a refusal
+  there is reported as such rather than as a payment failure.
 * **Signature payload order.** Implemented as the documented concatenation
   ``publicKey + amount(2dp) + currency + merchantReferenceId + timestamp``,
   HMAC-SHA256 keyed with the API password, base64-encoded. A signature rejection on
@@ -132,6 +151,9 @@ class GeideaAdapter(PaymentGatewayAdapter):
         CredentialField("timestamp_format", "Signature timestamp format", required=False,
                         default="%Y-%m-%dT%H:%M:%S",
                         help_text="strftime format for the signed timestamp. Change this first if signatures are rejected."),
+        CredentialField("tokenize_path", "Server-side tokenize path", required=False,
+                        default="/pgw/api/v1/direct/tokenize",
+                        help_text="Where a typed card number is exchanged for a token before authentication. Only accounts cleared to receive raw card numbers can use this; supply a token id on the payment form instead and this call is skipped."),
         CredentialField("force_full_3ds", "Always run Authenticate Payer", required=False,
                         default="false", choices=("true", "false"),
                         help_text="Forces the documented 4-call Direct sequence instead of detecting a frictionless run."),
@@ -170,6 +192,10 @@ class GeideaAdapter(PaymentGatewayAdapter):
         "Hosted checkout is a component, not a redirect: the session response carries "
         "an id and Geidea's own script is mounted in this application to run the "
         "payment. Time spent in it is customer interaction time, not gateway latency.",
+        "Direct API authenticates and pays against a card token, never a card number: "
+        "a typed card is exchanged for one first, which is a round trip most gateways "
+        "in this set do not need. It is timed as part of the flow rather than hidden, "
+        "and supplying a token id on the payment form removes it.",
         "Tokenisation is a two-step affair: a Store card payment mints the token, and a "
         "later Stored token payment charges it. The token belongs to a cardholder, so "
         "it is shown once on the transaction that created it and is never stored as a "
@@ -178,7 +204,8 @@ class GeideaAdapter(PaymentGatewayAdapter):
 
     documented_calls = {
         "hpp": "2 (create session + confirm order); the page itself is a mounted script",
-        "direct": "4 fixed (session -> initiate -> authenticate payer -> pay)",
+        "direct": "4 fixed (session -> initiate -> authenticate payer -> pay), plus a "
+                  "tokenize call when a card number is typed rather than a token supplied",
         "direct/token": "2 (fresh session + pay/token) — a session is required per charge",
     }
 
@@ -257,19 +284,30 @@ class GeideaAdapter(PaymentGatewayAdapter):
     def _hint(what: str, code: Any) -> str:
         """A short note on what to check, for the errors that say nothing themselves.
 
-        Geidea answers 100/"General error" for several unrelated conditions. Rather
-        than guess at a payload change, this points at the two causes the
-        documentation makes likely and at the flows that avoid the step entirely.
+        Geidea answers 100/"General error" for several unrelated conditions, and the
+        detailed code underneath it is often the only thing that identifies the cause.
+        These point at what to change rather than at the code itself.
         """
+        if str(code) == "069":
+            return (
+                ". Geidea's authentication and payment calls address a card token, not "
+                "a card number. Enter a card on the payment form — it is exchanged for "
+                "a token first — or paste a token id you already hold")
+        if "tokenize" in what:
+            return (
+                ". Server-side tokenization is only open to accounts cleared to receive "
+                "raw card numbers, which most sandbox accounts are not. Paste a card "
+                "token id on the payment form instead, or use hosted checkout, which "
+                "tokenizes in the browser")
         if "initiate authentication" not in what or str(code) != "100":
             return ""
         return (
             ". This code is Geidea's generic one and does not identify the cause. The "
-            "two usual ones: the account is not enabled to receive raw card numbers on "
-            "the Direct API — most sandbox accounts are not — or this 3DS "
-            "device-fingerprint step wants browser data that a server-to-server call "
-            "cannot supply. Hosted checkout and stored-token payments do not use this "
-            "step, so either will run on an account that cannot do raw-card Direct")
+            "two usual ones: the account is not enabled for Direct API card payments — "
+            "most sandbox accounts are not — or this 3DS device-fingerprint step wants "
+            "browser data that a server-to-server call cannot supply. Hosted checkout "
+            "and stored-token payments do not use this step, so either will run on an "
+            "account that cannot do Direct")
 
     @staticmethod
     def _session_id(body: Dict[str, Any]) -> str:
@@ -413,9 +451,10 @@ class GeideaAdapter(PaymentGatewayAdapter):
         if request.payment_mode == "token":
             return await self._pay_with_stored_token(client, request)
 
-        if request.card is None:
-            raise GatewayError("Geidea Direct API needs card details to authenticate.")
-        card = request.card
+        if request.card is None and not request.token_id:
+            raise GatewayError(
+                "Geidea Direct API needs either card details or a card token id. "
+                "Enter one on the payment form before starting the transaction.")
 
         # Storing the card is a property of the session, so the mode has to be decided
         # before the first call rather than bolted on at authorisation time.
@@ -424,11 +463,17 @@ class GeideaAdapter(PaymentGatewayAdapter):
             client, request, **({"cardOnFile": True} if store_card else {}))
         session_id = self._session_id(session_body)
 
+        # One call sees the PAN, and only when the operator typed one. Everything
+        # after this addresses the token.
+        token_id = request.token_id or await self._tokenize(client, session_id,
+                                                            request.card)
+
         initiate_response = await client.call(
             "POST /pgw/api/v6/direct/authenticate/initiate", "POST",
             self._url("/pgw/api/v6/direct/authenticate/initiate"),
             normalized=NormalizedOperation.AUTHENTICATION,
-            json={"sessionId": session_id, "paymentMethod": self._card_payload(card)})
+            json={"sessionId": session_id, "tokenId": token_id,
+                  "callbackUrl": request.webhook_url or None})
         initiate = self._check(
             client, await self.expect_ok(client, initiate_response, "initiate authentication"),
             "initiate authentication")
@@ -439,33 +484,137 @@ class GeideaAdapter(PaymentGatewayAdapter):
                 "POST /pgw/api/v6/direct/authenticate/payer", "POST",
                 self._url("/pgw/api/v6/direct/authenticate/payer"),
                 normalized=NormalizedOperation.AUTHENTICATION,
-                json={"sessionId": session_id, "paymentMethod": self._card_payload(card),
-                      "returnUrl": request.return_url})
-            self._check(client, await self.expect_ok(client, payer_response,
-                                                     "authenticate payer"),
-                        "authenticate payer")
+                json={"sessionId": session_id, "tokenId": token_id,
+                      "cardOnFile": store_card, "returnUrl": request.return_url})
+            payer = self._check(client, await self.expect_ok(client, payer_response,
+                                                             "authenticate payer"),
+                                "authenticate payer")
 
+            action = self._customer_action(payer)
+            if action:
+                # The issuer wants the cardholder. Stop here rather than calling Pay
+                # against an unauthenticated session: the OTP happens in the browser
+                # and the flow resumes at complete_direct_payment.
+                return PaymentResult(
+                    status=TransactionStatus.PENDING,
+                    gateway_reference=self._order_id(payer) or session_id,
+                    gateway_code=str(payer.get("responseCode") or ""),
+                    gateway_message="3DS challenge required; awaiting the cardholder",
+                    three_ds_required=True, requires_customer_action=True,
+                    action_url=action.get("url"),
+                    context={"session_id": session_id, "token_id": token_id,
+                             "store_card": store_card,
+                             "challenge_url": action.get("url"),
+                             "challenge_html": action.get("html")},
+                    raw=payer)
+
+        return await self._pay(client, session_id, token_id, store_card=store_card,
+                               three_ds_required=challenge)
+
+    async def complete_direct_payment(self, client: InstrumentedClient,
+                                      request: PaymentRequest,
+                                      context: Mapping[str, Any],
+                                      params: Mapping[str, str]) -> PaymentResult:
+        """Run the Pay call once the cardholder has finished the 3DS challenge.
+
+        Only the Pay call is timed here, which is the point: everything between the
+        Authenticate Payer response and the issuer sending the browser back was the
+        customer's time, and the engine records it as such.
+        """
+        session_id = context.get("session_id")
+        token_id = context.get("token_id")
+        if not session_id or not token_id:
+            raise GatewayError(
+                "Geidea: cannot resume this payment — the session and token it paused "
+                "on were not recorded.")
+        return await self._pay(client, str(session_id), str(token_id),
+                               store_card=bool(context.get("store_card")),
+                               three_ds_required=True)
+
+    async def _tokenize(self, client: InstrumentedClient, session_id: str,
+                        card: Card) -> str:
+        """Exchange a typed card number for a token. The only call that sees the PAN.
+
+        Timed, not treated as setup: on this gateway it is a round trip the payment
+        genuinely cannot happen without, and hiding it would flatter Geidea against
+        gateways that accept a card on the authorisation call itself. Supplying a
+        token id skips it, and the recorded call count shows which run did which.
+        """
+        path = self.get("tokenize_path") or "/pgw/api/v1/direct/tokenize"
+        response = await client.call(
+            f"POST {path}", "POST", self._url(path),
+            normalized=NormalizedOperation.TOKENIZATION,
+            json={"sessionId": session_id, "paymentMethod": self._card_payload(card)})
+        body = self._check(client, await self.expect_ok(client, response, "tokenize card"),
+                           "tokenize card")
+        nested = body.get("token")
+        token = (body.get("tokenId")
+                 or (nested.get("id") or nested.get("tokenId")
+                     if isinstance(nested, dict) else nested)
+                 or (body.get("paymentMethod") or {}).get("tokenId"))
+        if not token:
+            raise GatewayError(
+                "Geidea: the tokenize call succeeded but returned no token id. Paste a "
+                "token id on the payment form instead.", raw=body)
+        return str(token)
+
+    async def _pay(self, client: InstrumentedClient, session_id: str, token_id: str, *,
+                   store_card: bool, three_ds_required: bool) -> PaymentResult:
         pay_response = await client.call(
             "POST /pgw/api/v2/direct/pay", "POST", self._url("/pgw/api/v2/direct/pay"),
             normalized=NormalizedOperation.AUTHORIZATION,
-            json={"sessionId": session_id, "paymentMethod": self._card_payload(card),
-                  "paymentOperation": "Pay"})
+            json={"sessionId": session_id, "tokenId": token_id,
+                  "cardOnFile": store_card, "paymentOperation": "Pay"})
         paid = self._check(client, await self.expect_ok(client, pay_response, "pay"), "pay")
 
         result = self._outcome(paid, self._order_id(paid) or session_id)
-        result.three_ds_required = challenge
+        result.three_ds_required = three_ds_required
         if store_card:
             token, hint = self._stored_token(paid)
-            result.stored_token = token
+            result.stored_token = token or token_id
             result.stored_token_hint = hint
-            if token is None:
+            if not token:
                 # Worth saying plainly: the payment succeeded, the tokenisation did
                 # not, and a later stored-token charge has nothing to charge.
                 result.gateway_message = (
                     (result.gateway_message or "")
-                    + " — no card token was returned. The account may not have card "
-                      "storage enabled for this agreement.").strip()
+                    + " — the payment response carried no stored-card token. The token "
+                      "shown is the one this payment was made with; it is only reusable "
+                      "if the account has card storage enabled for this agreement."
+                ).strip()
         return result
+
+    @staticmethod
+    def _customer_action(payer: Dict[str, Any]) -> Optional[Dict[str, Optional[str]]]:
+        """Where to send the cardholder for a 3DS challenge, if there is anywhere.
+
+        Read out of the response rather than assumed: an issuer challenge arrives
+        either as a URL to navigate to or as an auto-submitting form to render, and
+        which one depends on the issuer, not on Geidea. Returns ``None`` for a
+        frictionless authentication, which is the case that should just carry on to
+        Pay. No field name here is ever *sent* — these are only read.
+        """
+        url_keys = ("redirectUrl", "redirecturl", "acsUrl", "acsurl", "challengeUrl",
+                    "challengeurl", "threeDSecureUrl", "threedsecureurl")
+        html_keys = ("redirectHtml", "redirecthtml", "htmlBodyContent", "htmlbodycontent",
+                     "challengeHtml", "challengehtml", "html")
+        found: Dict[str, Optional[str]] = {"url": None, "html": None}
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if isinstance(value, str) and value.strip():
+                        if found["url"] is None and key in url_keys:
+                            found["url"] = value.strip()
+                        elif found["html"] is None and key in html_keys:
+                            found["html"] = value
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(payer)
+        return found if (found["url"] or found["html"]) else None
 
     async def _pay_with_stored_token(self, client: InstrumentedClient,
                                      request: PaymentRequest) -> PaymentResult:
@@ -476,16 +625,19 @@ class GeideaAdapter(PaymentGatewayAdapter):
         gateway in this set that does. No card details are sent, so there is no
         authentication step and nothing to enter.
         """
-        token_id = self.get("token_id")
+        # The payment form's token wins over the stored credential, so a token minted
+        # by a Store card run can be charged straight away without a settings round trip.
+        token_id = request.token_id or self.get("token_id")
         agreement_id = self.get("agreement_id")
         missing = [label for label, value in
                    (("Card token ID", token_id), ("Agreement ID", agreement_id))
                    if not value]
         if missing:
             raise NotConfigured(
-                f"A stored-token payment needs {' and '.join(missing)} on Geidea's "
-                "settings. Run a Store card (tokenize) payment first — it returns the "
-                "token and the agreement, and the transaction page shows both.")
+                f"A stored-token payment needs {' and '.join(missing)}. Paste the token "
+                "on the payment form or set both on Geidea's settings page. Run a Store "
+                "card (tokenize) payment first — it returns the token and the "
+                "agreement, and the transaction page shows both.")
 
         session_body = await self._create_session(client, request, cardOnFile=True)
         session_id = self._session_id(session_body)

@@ -31,7 +31,8 @@ from app.gateways.base import (CredentialField, HealthProbe, HppSession, Payment
 from app.gateways.http import CallMeasurement, InstrumentedClient
 from app.models.enums import NormalizedOperation, TransactionStatus
 
-SCENARIOS = ("success", "decline", "timeout", "server_error", "slow", "three_ds")
+SCENARIOS = ("success", "decline", "timeout", "server_error", "slow", "three_ds",
+             "three_ds_challenge")
 
 
 class MockPayAdapter(PaymentGatewayAdapter):
@@ -62,7 +63,7 @@ class MockPayAdapter(PaymentGatewayAdapter):
 
     documented_calls = {
         "hpp": "2 (create session + confirm)",
-        "direct": "2 (payment + status), 3 with the 3DS scenario",
+        "direct": "2 (payment + status), 3 with a 3DS scenario",
     }
 
     # -- configuration ---------------------------------------------------- #
@@ -178,15 +179,40 @@ class MockPayAdapter(PaymentGatewayAdapter):
                                      request: PaymentRequest) -> PaymentResult:
         await self._simulate(client, "POST /mock/payments",
                              NormalizedOperation.PAYMENT_INITIATION, path="payments")
-        three_ds = self.scenario == "three_ds"
+        challenge = self.scenario == "three_ds_challenge"
+        three_ds = challenge or self.scenario == "three_ds"
         if three_ds:
             await self._simulate(client, "POST /mock/3ds/authenticate",
                                  NormalizedOperation.AUTHENTICATION, path="3ds")
+        if challenge:
+            # A simulated issuer that wants the cardholder. It sends them straight back
+            # rather than asking anything, which is the point: what is being exercised
+            # is the pause and the resume, not the OTP form. The gap between the two
+            # legs is the customer's time and is measured as such.
+            return PaymentResult(
+                TransactionStatus.PENDING, f"mock_pay_{request.reference}",
+                "3ds", "simulated 3DS challenge; awaiting the cardholder",
+                three_ds_required=True, requires_customer_action=True,
+                action_url=request.return_url or None,
+                context={"reference": request.reference})
+
         body = await self._simulate(client, "POST /mock/payments/authorize",
                                     NormalizedOperation.AUTHORIZATION, path="authorize")
         status = TransactionStatus.DECLINED if body["declined"] else TransactionStatus.SUCCESS
         return PaymentResult(status, f"mock_pay_{request.reference}",
                              body["code"], body["message"], three_ds_required=three_ds)
+
+    async def complete_direct_payment(self, client: InstrumentedClient,
+                                      request: PaymentRequest,
+                                      context: Mapping[str, Any],
+                                      params: Mapping[str, str]) -> PaymentResult:
+        """Authorize once the simulated cardholder is back. One call, and only it timed."""
+        body = await self._simulate(client, "POST /mock/payments/authorize",
+                                    NormalizedOperation.AUTHORIZATION, path="authorize")
+        status = TransactionStatus.DECLINED if body["declined"] else TransactionStatus.SUCCESS
+        reference = context.get("reference") or request.reference
+        return PaymentResult(status, f"mock_pay_{reference}", body["code"],
+                             body["message"], three_ds_required=True)
 
     async def get_payment_status(self, client: InstrumentedClient,
                                  payment_id: str) -> PaymentResult:

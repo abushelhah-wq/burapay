@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
 from app.api.v1.router import api_router
@@ -162,6 +163,23 @@ async def handle_not_supported(request: Request, exc: NotSupported) -> JSONRespo
 async def handle_gateway_error(request: Request, exc: BenchmarkError) -> JSONResponse:
     error = normalize(exc, gateway="", operation=request.url.path)
     return JSONResponse(error.to_dict(), status_code=status.HTTP_502_BAD_GATEWAY)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def handle_http_exception(request: Request,
+                                exc: StarletteHTTPException) -> JSONResponse:
+    """Give routine 4xx answers the same shape as every other error.
+
+    FastAPI's default is ``{"detail": ...}`` while everything else this application
+    raises answers with ``{"category", "message"}``. One client-side branch per error
+    shape is one too many, so both keys are present and say the same thing.
+    """
+    detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
+    category = (ErrorCategory.AUTHENTICATION_ERROR
+                if exc.status_code in (401, 403) else ErrorCategory.INVALID_REQUEST)
+    return JSONResponse({"category": category.value, "message": detail,
+                         "detail": exc.detail if not isinstance(exc.detail, str) else None},
+                        status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
 
 @app.exception_handler(RequestValidationError)
