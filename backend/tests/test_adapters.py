@@ -746,3 +746,64 @@ class TestMockPay:
         await adapter.process_direct_payment(client, request_for())
         assert client.measurements[0].duration_ms >= 50
         await client.client.aclose()
+
+
+class TestGeideaErrorReporting:
+    """A generic gateway code is only useful if the detailed one travels with it."""
+
+    def adapter(self):
+        return build_adapter("geidea", {"merchant_public_key": "pk", "api_password": "pw",
+                                        "api_base": "https://geidea.test"})
+
+    async def test_the_detailed_message_is_not_discarded(self):
+        from app.core.errors import GatewayError
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s1"}}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "100", "responseMessage": "General error",
+                "detailedResponseCode": "100.5",
+                "detailedResponseMessage": "Merchant is not configured for raw card data"}),
+        }))
+        with pytest.raises(GatewayError) as excinfo:
+            await adapter.process_direct_payment(client, request_for())
+
+        text = str(excinfo.value)
+        # Both levels, because "General error" alone identifies nothing.
+        assert "General error" in text
+        assert "Merchant is not configured for raw card data" in text
+        assert "100.5" in text
+        # The specific code is what gets recorded and compared, not the generic one.
+        assert excinfo.value.gateway_code == "100.5"
+        assert client.measurements[-1].gateway_response_code == "100.5"
+        await client.client.aclose()
+
+    async def test_the_generic_code_carries_a_hint_about_what_to_check(self):
+        from app.core.errors import GatewayError
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s1"}}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "100", "responseMessage": "General error"}),
+        }))
+        with pytest.raises(GatewayError) as excinfo:
+            await adapter.process_direct_payment(client, request_for())
+        text = str(excinfo.value)
+        assert "raw card numbers" in text
+        assert "Hosted checkout and stored-token payments do not use this step" in text
+        await client.client.aclose()
+
+    async def test_no_hint_is_attached_where_the_code_is_already_specific(self):
+        from app.core.errors import GatewayError
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={
+                "responseCode": "123", "responseMessage": "Insufficient funds"}),
+        }))
+        with pytest.raises(GatewayError) as excinfo:
+            await adapter.process_direct_payment(client, request_for())
+        assert "raw card numbers" not in str(excinfo.value)
+        assert "Insufficient funds" in str(excinfo.value)
+        await client.client.aclose()

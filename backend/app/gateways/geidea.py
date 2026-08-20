@@ -223,17 +223,53 @@ class GeideaAdapter(PaymentGatewayAdapter):
 
     def _check(self, client: InstrumentedClient, body: Dict[str, Any],
                what: str) -> Dict[str, Any]:
-        """Read Geidea's own response code and attach it to the call that carried it."""
+        """Read Geidea's own response code and attach it to the call that carried it.
+
+        Both levels of Geidea's error reporting are reported. ``responseMessage`` is
+        frequently the useless "General error" while ``detailedResponseMessage`` says
+        what actually went wrong, so preferring one over the other — as this did —
+        throws away the informative half exactly when it is needed.
+        """
         code = body.get("responseCode")
-        message = body.get("responseMessage") or body.get("detailedResponseMessage")
+        message = body.get("responseMessage")
+        detailed_code = body.get("detailedResponseCode")
+        detailed_message = body.get("detailedResponseMessage")
         ok = code in (None, SUCCESS_CODE)
-        client.annotate_last(code=code, message=message, success=ok,
+
+        parts = [f"responseCode={code!r}"]
+        if message:
+            parts.append(f"message={message!r}")
+        if detailed_code and detailed_code != code:
+            parts.append(f"detailedResponseCode={detailed_code!r}")
+        if detailed_message and detailed_message != message:
+            parts.append(f"detailedResponseMessage={detailed_message!r}")
+        summary = " ".join(parts)
+
+        client.annotate_last(code=detailed_code or code,
+                             message=detailed_message or message, success=ok,
                              category=None if ok else ErrorCategory.GATEWAY_DECLINE)
         if not ok:
-            raise GatewayError(
-                f"Geidea: {what} responseCode={code!r} message={message!r}",
-                gateway_code=str(code), raw=body)
+            raise GatewayError(f"Geidea: {what} {summary}{self._hint(what, code)}",
+                               gateway_code=str(detailed_code or code), raw=body)
         return body
+
+    @staticmethod
+    def _hint(what: str, code: Any) -> str:
+        """A short note on what to check, for the errors that say nothing themselves.
+
+        Geidea answers 100/"General error" for several unrelated conditions. Rather
+        than guess at a payload change, this points at the two causes the
+        documentation makes likely and at the flows that avoid the step entirely.
+        """
+        if "initiate authentication" not in what or str(code) != "100":
+            return ""
+        return (
+            ". This code is Geidea's generic one and does not identify the cause. The "
+            "two usual ones: the account is not enabled to receive raw card numbers on "
+            "the Direct API — most sandbox accounts are not — or this 3DS "
+            "device-fingerprint step wants browser data that a server-to-server call "
+            "cannot supply. Hosted checkout and stored-token payments do not use this "
+            "step, so either will run on an account that cannot do raw-card Direct")
 
     @staticmethod
     def _session_id(body: Dict[str, Any]) -> str:

@@ -7,7 +7,7 @@
  * and only one of them is the gateway's responsibility.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { Fragment, useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import { api } from '../api/client'
@@ -202,21 +202,51 @@ export default function TransactionDetail() {
                   </thead>
                   <tbody>
                     {timed.map((call) => (
-                      <tr key={call.id}>
-                        <td className="max-w-[18rem] truncate">{call.operation_name}</td>
-                        <td className="num">{msExact(call.duration_ms)}</td>
-                        <td className="num">{call.http_status ?? '—'}</td>
-                        <td className="font-mono text-xs">
-                          {call.gateway_response_code ?? '—'}
-                        </td>
-                        <td>
-                          {call.success
-                            ? <span className="text-emerald-600">Success</span>
-                            : <span className="text-red-600">
-                                {call.error_category ?? 'Failed'}
-                              </span>}
-                        </td>
-                      </tr>
+                      <Fragment key={call.id}>
+                        <tr>
+                          <td className="max-w-[18rem] truncate">{call.operation_name}</td>
+                          <td className="num">{msExact(call.duration_ms)}</td>
+                          <td className="num">{call.http_status ?? '—'}</td>
+                          <td className="font-mono text-xs">
+                            {call.gateway_response_code ?? '—'}
+                          </td>
+                          <td>
+                            {call.success
+                              ? <span className="text-emerald-600">Success</span>
+                              : <span className="text-red-600">
+                                  {call.error_category ?? 'Failed'}
+                                </span>}
+                          </td>
+                        </tr>
+                        {/* What the gateway actually said. A generic code like Geidea's
+                            "General error" is unreadable without this, and reading it
+                            should not require a shell on the server. Secrets and card
+                            numbers are stripped before it is ever stored. */}
+                        {(call.gateway_response_message || call.error_message
+                          || call.response_snippet) && !call.success && (
+                          <tr>
+                            <td colSpan={5} className="bg-ink-50 !py-2">
+                              {call.gateway_response_message && (
+                                <p className="text-xs text-red-700">
+                                  {call.gateway_response_message}
+                                </p>
+                              )}
+                              {call.response_snippet && (
+                                <details className="mt-1">
+                                  <summary className="cursor-pointer text-xs text-ink-500">
+                                    Raw gateway response
+                                  </summary>
+                                  <pre className="mt-2 max-h-56 overflow-auto rounded
+                                                  bg-ink-900 p-3 text-[11px] leading-relaxed
+                                                  text-ink-100">
+{call.response_snippet}
+                                  </pre>
+                                </details>
+                              )}
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     ))}
                     <tr className="bg-ink-50 font-semibold">
                       <td>Gateway API time</td>
