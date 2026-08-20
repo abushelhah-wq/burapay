@@ -6,16 +6,20 @@
  * only then can the payment finish. The time spent here belongs to the customer and
  * is recorded as customer interaction time, never as the gateway's API latency.
  *
- * Two shapes arrive, and which one depends on the issuer rather than on the gateway:
+ * This page only ever *navigates*. It does not render the issuer's markup, and it does
+ * not frame it, for two separate reasons:
  *
- * * a URL to navigate to, which is a plain redirect;
- * * an auto-submitting form, which is markup this application received from somewhere
- *   else. That is rendered inside a sandboxed iframe rather than injected into the
- *   page. A sandboxed frame is its own opaque origin: the form can post itself to the
- *   issuer, and it cannot read this application's DOM, storage or session.
+ *  * A challenge that runs in an iframe ends by sending the browser back to this
+ *    application's return URL — inside the frame. That return is refused by our own
+ *    `X-Frame-Options: DENY`, and the cardholder is left looking at an empty box. At
+ *    the top level the header never applies and the return is an ordinary navigation.
+ *  * The markup came from somebody else. When the issuer gives a form rather than a
+ *    URL, the browser goes to a backend route that serves it under
+ *    `Content-Security-Policy: sandbox` — an opaque origin, so it can post itself to
+ *    the issuer and reach nothing of ours.
  *
- * Either way the issuer sends the browser back to the transaction's return URL, where
- * the server finishes the payment and redirects to the transaction page.
+ * Either way the issuer returns the browser to the transaction's return leg, where the
+ * server finishes the payment and redirects to the transaction page.
  */
 
 import { useEffect, useState } from 'react'
@@ -24,7 +28,6 @@ import { useParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type { ThreeDsChallenge as Challenge } from '../api/types'
 import { Card, ErrorNotice, Spinner } from '../components/ui'
-import { money } from '../lib/format'
 
 export default function ThreeDsChallenge() {
   const { id = '' } = useParams()
@@ -36,21 +39,16 @@ export default function ThreeDsChallenge() {
   }, [id])
 
   useEffect(() => {
-    // A URL is a redirect and nothing more. Replace rather than push, so the back
-    // button does not land the cardholder on a challenge they have already answered.
-    if (challenge?.mode === 'redirect' && challenge.challenge_url) {
-      window.location.replace(challenge.challenge_url)
-    }
+    if (!challenge?.challenge_url) return
+    // Replace rather than push, so the back button does not land the cardholder on a
+    // challenge they have already answered.
+    window.location.replace(challenge.challenge_url)
   }, [challenge])
 
   if (error) return <ErrorNotice error={error} />
   if (!challenge) return <Spinner label="Loading the challenge" />
 
-  if (challenge.mode === 'redirect') {
-    return <Spinner label="Sending you to your bank" />
-  }
-
-  if (!challenge.challenge_html) {
+  if (!challenge.challenge_url) {
     return (
       <Card title="Nothing to show">
         <p className="text-sm text-ink-600">
@@ -62,44 +60,15 @@ export default function ThreeDsChallenge() {
           The full gateway response is on the{' '}
           <a className="font-medium underline" href={`/transactions/${id}`}>
             transaction page
+          </a>{' '}
+          and in the{' '}
+          <a className="font-medium underline" href={`/logs?transaction=${id}`}>
+            call log
           </a>, under the authentication call.
         </p>
       </Card>
     )
   }
 
-  return (
-    <div className="space-y-4">
-      <header>
-        <h1 className="text-2xl font-semibold text-ink-900">Verify with your bank</h1>
-        <p className="text-sm text-ink-500">
-          {money(challenge.amount, challenge.currency)} ·{' '}
-          {challenge.gateway_code} · {challenge.environment}. Your bank is asking for a
-          one-time password. The time you spend here is recorded as customer
-          interaction, not as gateway latency.
-        </p>
-      </header>
-
-      <div className="card overflow-hidden p-0">
-        {/*
-          sandbox without allow-same-origin: the frame gets an opaque origin, so the
-          issuer's markup can submit itself and navigate, and can reach nothing of
-          ours. allow-top-navigation-by-user-activation lets the issuer return the
-          whole window to our return URL when the cardholder submits.
-        */}
-        <iframe
-          title="3-D Secure challenge"
-          className="h-[36rem] w-full border-0"
-          sandbox="allow-forms allow-scripts allow-top-navigation-by-user-activation"
-          srcDoc={challenge.challenge_html}
-        />
-      </div>
-
-      <p className="text-xs text-ink-500">
-        Not seeing a prompt? Some issuers only accept the challenge in a full window.
-        The payment stays pending until it completes, and the transaction page shows
-        where it stopped.
-      </p>
-    </div>
-  )
+  return <Spinner label="Sending you to your bank" />
 }

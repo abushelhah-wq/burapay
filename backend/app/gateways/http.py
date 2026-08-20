@@ -74,11 +74,11 @@ class CallMeasurement:
     request_size_bytes: Optional[int] = None
     response_size_bytes: Optional[int] = None
     response_snippet: Optional[str] = None
-    #: The body that was *sent*, sanitized the same way the response is. Kept only for
-    #: calls the gateway rejected: when a provider answers "General error" the request
-    #: is the only place the cause can be, and reading it off the transaction page beats
-    #: guessing at it from the outside. Card numbers are truncated to a last-four and
-    #: CVVs are dropped before this is stored, exactly as everywhere else.
+    #: The body that was *sent*, sanitized the same way the response is. When a
+    #: provider answers "General error" the request is the only place the cause can be,
+    #: and reading it off the log page beats guessing at it from the outside. Card
+    #: numbers are truncated to a last-four and CVVs are dropped before this is stored,
+    #: exactly as everywhere else.
     request_snippet: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -189,12 +189,13 @@ class InstrumentedClient:
             record.error_message = f"HTTP {response.status_code}"
         # The snippet is sanitized twice over: PAN/secret scrubbing, then truncation.
         record.response_snippet = self._clean(sanitize_snippet(response.text, 1500))
-        if not record.success:
-            # Only for a failed call, and only after the sanitizer has been over it.
-            # A gateway that reports nothing but "General error" leaves the request as
-            # the only evidence, and a field in the wrong place is invisible without it.
-            record.request_snippet = self._clean(
-                sanitize_snippet(self._readable(request_body), 1500))
+        # Both halves of every call, so the log page can show what went out as well as
+        # what came back. A gateway that reports nothing but "General error" leaves the
+        # request as the only evidence, and a working call is the reference you compare
+        # a broken one against. Sanitized first, always: PANs truncated to a last four,
+        # CVVs dropped by name, secrets redacted.
+        record.request_snippet = self._clean(
+            sanitize_snippet(self._readable(request_body), 1500))
 
         self.measurements.append(record)
         self._log(record)

@@ -1,6 +1,6 @@
 from app.schemas.auth import (LoginRequest, PasswordChange, TokenResponse, UserCreate,
                               UserOut)
-from app.schemas.benchmarks import (ApiMeasurementOut, BenchmarkRunCreate,
+from app.schemas.benchmarks import (ApiLogEntry, ApiMeasurementOut, BenchmarkRunCreate,
                                     BenchmarkRunDetail, BenchmarkRunOut,
                                     BrowserContext, BrowserMeasurementOut, BrowserMetricsIn,
                                     CardIn,
@@ -14,7 +14,7 @@ from app.schemas.gateways import (CredentialFieldOut, CredentialUpdate, Credenti
                                   GatewayUpdate)
 
 __all__ = [
-    "ApiMeasurementOut", "BenchmarkRunCreate", "BenchmarkRunDetail", "BenchmarkRunOut",
+    "ApiLogEntry", "ApiMeasurementOut", "BenchmarkRunCreate", "BenchmarkRunDetail", "BenchmarkRunOut",
     "BrowserContext", "BrowserMeasurementOut", "BrowserMetricsIn", "CardIn",
     "ComparisonTestCreate",
     "ComparisonTestOut", "CredentialFieldOut", "CredentialUpdate", "CredentialsOut",

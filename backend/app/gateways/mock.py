@@ -18,6 +18,7 @@ Scenarios: success, decline, timeout, server_error, slow, three_ds.
 from __future__ import annotations
 
 import asyncio
+import json
 import random
 import time
 from datetime import datetime, timezone
@@ -113,6 +114,13 @@ class MockPayAdapter(PaymentGatewayAdapter):
             started_at=datetime.now(timezone.utc),
             is_setup_call=is_setup,
         )
+        # No socket, so there is no real body — but the log page exists to show what
+        # went out, and a simulator that shows nothing there cannot demonstrate it.
+        # Labelled as simulated so it is never mistaken for a captured request.
+        record.request_snippet = json.dumps({
+            "simulated": True, "operation": operation, "scenario": self.scenario,
+            "note": "MockPay makes no HTTP call; this describes what it stood in for.",
+        })
         started = time.perf_counter()
         delay = self.latency + (random.uniform(-self.jitter, self.jitter) if self.jitter else 0.0)
         if self.scenario == "slow":
@@ -143,7 +151,9 @@ class MockPayAdapter(PaymentGatewayAdapter):
         record.gateway_response_message = "Do not honour" if declined else "Approved"
         if declined:
             record.error_category = ErrorCategory.GATEWAY_DECLINE
-        record.response_snippet = '{"simulated": true}'
+        record.response_snippet = json.dumps({
+            "simulated": True, "responseCode": record.gateway_response_code,
+            "responseMessage": record.gateway_response_message})
         client.measurements.append(record)
 
         return {"code": record.gateway_response_code,
@@ -230,7 +240,6 @@ class MockPayAdapter(PaymentGatewayAdapter):
         return PaymentResult(status, payment_id, body["code"], body["message"])
 
     def parse_webhook(self, headers: Mapping[str, str], body: bytes) -> Dict[str, Any]:
-        import json
         try:
             payload = json.loads(body or b"{}")
         except ValueError:

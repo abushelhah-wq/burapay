@@ -199,7 +199,11 @@ export default function TransactionDetail() {
       )}
 
       <div className="grid gap-6 lg:grid-cols-5">
-        <Card title="API performance" className="lg:col-span-3">
+        <Card title="API performance" className="lg:col-span-3"
+              action={<Link to={`/logs?transaction=${transaction.id}`}
+                            className="text-xs font-medium text-accent-600 hover:underline">
+                        Open in call log
+                      </Link>}>
           {timed.length === 0 ? (
             <EmptyState title="No timed calls recorded"
                         description="The transaction failed before any gateway call completed." />

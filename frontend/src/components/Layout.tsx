@@ -19,6 +19,9 @@ const NAV = [
   { to: '/transactions', label: 'Transactions' },
   { to: '/comparison', label: 'Comparison' },
   { to: '/reports', label: 'Reports' },
+  // Sits next to Gateways rather than under Transactions: it is about what a gateway
+  // does, not about how one payment went.
+  { to: '/logs', label: 'Call Log' },
   { to: '/gateways', label: 'Gateways' },
   { to: '/settings', label: 'Settings' },
 ]

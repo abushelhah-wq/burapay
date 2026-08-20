@@ -348,6 +348,52 @@ class TestTransactionLifecycle:
         # The pause is over: nothing should keep offering a way back into it.
         assert detail["awaiting_customer_action"] is False
 
+    async def test_the_challenge_document_is_served_in_its_own_opaque_origin(
+            self, client: AsyncClient, auth_headers: dict):
+        """The issuer's markup must not get this application's origin, or its frame.
+
+        Framing the challenge was the bug: the issuer ends by returning the browser to
+        our return URL, and inside a frame that return is refused by our own
+        X-Frame-Options. At the top level it is an ordinary navigation — but then the
+        markup would be running on our host, so CSP sandbox puts it in an opaque origin
+        instead.
+        """
+        from app.db.session import get_sessionmaker
+        from app.models import Transaction
+
+        await configure_mockpay(client, auth_headers, scenario="three_ds_challenge")
+        started = await run_transaction(client, auth_headers)
+
+        # Give it a form challenge, which is the case that needs a document of its own.
+        async with get_sessionmaker()() as session:
+            transaction = await session.get(Transaction, started["transaction_id"])
+            context = dict(transaction.context or {})
+            context["adapter_context"] = {
+                "challenge_html": "<form action='https://issuer.test/acs'></form>"}
+            transaction.context = context
+            await session.commit()
+
+        response = await client.get(
+            f"/v1/transactions/{started['transaction_id']}/three-ds/challenge")
+        assert response.status_code == 200
+        assert "issuer.test" in response.text
+
+        csp = response.headers["content-security-policy"]
+        assert csp.startswith("sandbox ")
+        # allow-same-origin would hand the issuer's markup our cookies and storage.
+        assert "allow-same-origin" not in csp
+        # ...and without this the issuer cannot send the cardholder back to us.
+        assert "allow-top-navigation" in csp
+        assert response.headers["cache-control"] == "no-store"
+
+    async def test_the_challenge_document_refuses_when_nothing_is_waiting(
+            self, client: AsyncClient, auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers)
+        response = await client.get(
+            f"/v1/transactions/{started['transaction_id']}/three-ds/challenge")
+        assert response.status_code == 400
+
     async def test_the_3ds_endpoint_refuses_a_transaction_that_is_not_waiting(
             self, client: AsyncClient, auth_headers: dict):
         await configure_mockpay(client, auth_headers)
@@ -818,3 +864,100 @@ class TestPaymentModes:
             "transaction_count": 1, "amount": 1.0, "currency": "SAR",
             "interval_seconds": 0})
         assert created.json()["payment_mode"] == "standard"
+
+
+class TestApiLog:
+    """The call log: every request this platform made, and what came back."""
+
+    async def test_the_log_carries_both_halves_of_every_call(
+            self, client: AsyncClient, auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers)
+
+        response = await client.get("/v1/logs", headers=auth_headers)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] >= 2
+        entry = body["items"][0]
+        assert entry["transaction_id"] == started["transaction_id"]
+        assert entry["gateway_code"] == "mockpay"
+        assert entry["duration_ms"] >= 0
+        assert entry["request_snippet"] is not None
+        assert entry["response_snippet"] is not None
+
+    async def test_the_log_is_newest_first(self, client: AsyncClient, auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        await run_transaction(client, auth_headers)
+        await run_transaction(client, auth_headers)
+        items = (await client.get("/v1/logs", headers=auth_headers)).json()["items"]
+        stamps = [item["started_at"] for item in items]
+        assert stamps == sorted(stamps, reverse=True)
+
+    async def test_filtering_by_outcome_and_operation(self, client: AsyncClient,
+                                                      auth_headers: dict):
+        await configure_mockpay(client, auth_headers, scenario="decline")
+        await run_transaction(client, auth_headers)
+
+        failed = (await client.get("/v1/logs?outcome=failed",
+                                   headers=auth_headers)).json()
+        assert all(item["success"] is False for item in failed["items"])
+
+        authorizations = (await client.get(
+            "/v1/logs?normalized_operation=AUTHORIZATION", headers=auth_headers)).json()
+        assert authorizations["total"] >= 1
+        assert all(item["normalized_operation"] == "AUTHORIZATION"
+                   for item in authorizations["items"])
+
+    async def test_searching_matches_the_endpoint(self, client: AsyncClient,
+                                                  auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        await run_transaction(client, auth_headers)
+        found = (await client.get("/v1/logs?search=authorize",
+                                  headers=auth_headers)).json()
+        assert found["total"] >= 1
+        assert all("authorize" in item["endpoint"].lower()
+                   or "authorize" in item["operation_name"].lower()
+                   for item in found["items"])
+
+    async def test_the_summary_is_drawn_from_the_data_not_hard_coded(
+            self, client: AsyncClient, auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        await run_transaction(client, auth_headers)
+        summary = (await client.get("/v1/logs/summary", headers=auth_headers)).json()
+        assert summary["total"] >= 2
+        assert {"code": "mockpay", "calls": summary["gateways"][0]["calls"]} in [
+            {"code": g["code"], "calls": g["calls"]} for g in summary["gateways"]]
+        assert "AUTHORIZATION" in summary["operations"]
+
+    async def test_the_log_never_holds_a_card_number(self, client: AsyncClient,
+                                                     auth_headers: dict, monkeypatch):
+        """Section 25 again, at the one place the whole payload is on display."""
+        from app.core.config import settings as app_settings
+        monkeypatch.setattr(app_settings, "allow_direct_card_entry", True)
+        await configure_mockpay(client, auth_headers)
+        await run_transaction(
+            client, auth_headers,
+            card={"number": "4111111111111111", "month": "12", "year": "2030",
+                  "cvc": "123", "holder": "Test Person"})
+        body = (await client.get("/v1/logs", headers=auth_headers)).text
+        assert "4111111111111111" not in body
+
+    async def test_the_log_needs_a_session(self, client: AsyncClient):
+        assert (await client.get("/v1/logs")).status_code == 401
+
+    async def test_clearing_the_log_is_admin_only_and_leaves_timings_alone(
+            self, client: AsyncClient, auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers)
+        before = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                   headers=auth_headers)).json()["transaction"]
+
+        cleared = await client.delete("/v1/logs", headers=auth_headers)
+        assert cleared.status_code == 200
+        assert (await client.get("/v1/logs", headers=auth_headers)).json()["total"] == 0
+
+        after = (await client.get(f"/v1/transactions/{started['transaction_id']}",
+                                  headers=auth_headers)).json()["transaction"]
+        # The measurements are gone; the numbers already reported are not.
+        assert after["gateway_api_time_ms"] == before["gateway_api_time_ms"]
+        assert after["total_duration_ms"] == before["total_duration_ms"]

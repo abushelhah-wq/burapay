@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -204,15 +204,71 @@ async def three_ds_challenge(transaction_id: str, _: User = Depends(get_current_
             detail="That transaction is not waiting for a 3DS challenge.")
 
     challenge_url = adapter_context.get("challenge_url")
-    challenge_html = adapter_context.get("challenge_html")
+    has_form = bool(adapter_context.get("challenge_html"))
+    if not challenge_url and not has_form:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The gateway said a challenge was required but returned nowhere to "
+                   "send the cardholder. The full response is on the transaction page, "
+                   "under the authentication call.")
     return ThreeDsChallenge(
         transaction_id=transaction.id, gateway_code=transaction.gateway_code,
         status=transaction.status,
         mode="redirect" if challenge_url else "form",
-        challenge_url=challenge_url, challenge_html=challenge_html,
+        # The markup itself is never returned here — the browser is sent to the
+        # sandboxed document that serves it, so it never enters this application's page.
+        challenge_url=(challenge_url
+                       or f"/api/v1/transactions/{transaction.id}/three-ds/challenge"),
         return_url=f"/api/v1/transactions/{transaction.id}/return",
         amount=transaction.amount, currency=transaction.currency,
         environment=transaction.environment)
+
+
+@router.get("/{transaction_id}/three-ds/challenge", include_in_schema=False)
+async def three_ds_challenge_document(transaction_id: str,
+                                      session: AsyncSession = Depends(get_session)
+                                      ) -> HTMLResponse:
+    """Serve the issuer's challenge form as a page of its own, not inside a frame.
+
+    A 3DS challenge ends by sending the browser back to this application's return URL.
+    In an iframe that return is blocked by our own ``X-Frame-Options: DENY``, and the
+    cardholder is left staring at an empty box — which is exactly what happened. So the
+    challenge runs at the top level instead, where the return is an ordinary navigation
+    and the header never applies.
+
+    Serving somebody else's markup from our own host would normally hand it our origin.
+    ``Content-Security-Policy: sandbox`` without ``allow-same-origin`` prevents that:
+    the document lands in an opaque origin, so it can post itself to the issuer and
+    navigate, and it cannot read this application's cookies, storage or DOM.
+
+    Unauthenticated for the same reason the return leg is — the cardholder arrives here
+    by navigation, carrying no session token — and it answers only while the
+    transaction is actually waiting for a challenge.
+    """
+    transaction = await session.get(Transaction, transaction_id)
+    if transaction is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="No such transaction.")
+    context = dict(transaction.context or {})
+    if not context.get("awaiting_customer_action"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="That transaction is not waiting for a 3DS challenge.")
+
+    html = (dict(context.get("adapter_context") or {})).get("challenge_html")
+    if not html:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="The gateway returned no challenge form for this "
+                                   "payment.")
+    return HTMLResponse(html, headers={
+        # No allow-same-origin: that is the whole point. allow-top-navigation lets the
+        # issuer send the browser back to us when the cardholder is done.
+        "Content-Security-Policy":
+            "sandbox allow-forms allow-scripts allow-top-navigation allow-popups",
+        # These override the defaults the middleware would otherwise set.
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Cache-Control": "no-store",
+    })
 
 
 @router.post("/{transaction_id}/browser-metrics", response_model=Message)

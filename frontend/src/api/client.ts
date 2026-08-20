@@ -9,8 +9,8 @@
 
 import type {
   AppSettings, BenchmarkRun, ComparisonRow, ComparisonTest, Dashboard, Gateway,
-  GatewayHealth, HppRow, Page, Ranking, ThreeDsChallenge, Transaction, TransactionDetail,
-  User,
+  ApiLogEntry, GatewayHealth, HppRow, LogFilters, LogSummary, Page, Ranking,
+  ThreeDsChallenge, Transaction, TransactionDetail, User,
 } from './types'
 
 const BASE = '/api'
@@ -160,6 +160,13 @@ export const api = {
     request<{ transaction_id: string; gateway_code: string; status: string; mode: string;
       redirect_url: string | null; return_url: string; environment: string; amount: number;
       currency: string; widget: Record<string, string> }>(`/v1/transactions/${id}/hpp`),
+  // -- call log --------------------------------------------------------- //
+  logs: (filters: LogFilters = {}) =>
+    request<Page<ApiLogEntry>>(`/v1/logs${query(filters as Record<string, unknown>)}`),
+  logSummary: () => request<LogSummary>('/v1/logs/summary'),
+  clearLogs: (before?: string) =>
+    request<{ message: string }>(`/v1/logs${query({ before })}`, { method: 'DELETE' }),
+
   deleteTransaction: (id: string) =>
     request<{ message: string }>(`/v1/transactions/${id}`, { method: 'DELETE' }),
   reportBrowserMetrics: (id: string, payload: {

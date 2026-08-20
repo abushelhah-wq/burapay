@@ -397,16 +397,26 @@ Three more details that are easy to get wrong and produce nothing but a generic 
   Omitting them gets `detailedResponseCode=013` "Internal Server Error", which does not
   say which field it disliked — so the adapter always sends all of them.
 
-### When a gateway will not say what is wrong
+### Call Log
 
-Geidea answers a malformed request with `responseCode=100` "General error" and a
-detailed code that is often no more specific. There is no way to reason about that from
-the outside, so the platform records **what it sent**: expand a failed call on the
-transaction page and there are two blocks, *Raw gateway response* and *What we sent*.
+Geidea answers a malformed request with `responseCode=100` "General error" and a detailed
+code that is often no more specific. There is no way to reason about that from the
+outside, so **Call Log** in the sidebar lists every request this platform has made to a
+gateway and every response that came back, with the time each one took.
 
-The request is stored only for calls that failed, and only after the same sanitizer that
-guards everything else — card numbers truncated to a last four, CVV dropped by name,
-secrets redacted. A test asserts a PAN cannot reach it.
+Filter by gateway, operation or outcome, search across endpoint / operation / message,
+and expand any row for the request and the response side by side. That last part is the
+point: a working call is what you compare a broken one against. Each transaction page
+links straight through to its own calls.
+
+Both bodies were sanitized before they were ever stored — card numbers truncated to a
+last four, CVVs dropped by name, secrets redacted. There is no unsanitized copy anywhere
+for this to be compared against; the scrubbing happens on the way in, not on the way out,
+and a test asserts a PAN cannot reach the log.
+
+`DELETE /v1/logs` (the **Clear log** button, admin only) drops recorded calls. Transaction
+timings are columns on the transaction row, so clearing the log never rewrites a number
+that has already been reported.
 
 **Run Benchmark → Direct API** has a *Payment details* step:
 
@@ -462,6 +472,20 @@ status. **Only the two server legs count as gateway API time.** The OTP, the iss
 page and the round trip through the browser land in `customer_interaction_time_ms`,
 where they can neither flatter nor penalise the gateway. A payment left waiting shows a
 *Continue verification* link on its transaction page.
+
+**The challenge runs at the top level, never in a frame.** An iframe seems like the
+obvious place for it, and it does not work: the challenge *ends* by sending the browser
+back to this application's return URL, and inside a frame that return is refused by our
+own `X-Frame-Options: DENY` — the cardholder is left looking at an empty box. At the top
+level the header never applies.
+
+That leaves the other problem: when the issuer hands back an auto-submitting form rather
+than a URL, that markup would then be running on our own host. So it is served from
+`/api/v1/transactions/{id}/three-ds/challenge` under
+`Content-Security-Policy: sandbox allow-forms allow-scripts allow-top-navigation`. With
+no `allow-same-origin` the document lands in an opaque origin: it can post itself to the
+issuer and navigate the window, and it cannot read this application's cookies, storage
+or DOM. The route answers only while that transaction is actually waiting.
 
 The card **does not survive the pause**. It is not written down, not held between
 requests and not put in the transaction's context, so the Pay call on the way back

@@ -331,9 +331,10 @@ export interface ThreeDsChallenge {
   gateway_code: string
   status: string
   /** `redirect` when the issuer gave a URL, `form` when it gave markup to post. */
+  /** `redirect` when the issuer gave a URL of its own, `form` when it points at the
+   *  sandboxed document this application serves. Either way, navigate to it. */
   mode: 'redirect' | 'form'
   challenge_url: string | null
-  challenge_html: string | null
   return_url: string
   amount: number
   currency: string
@@ -347,4 +348,53 @@ export interface CardEntry {
   year: string
   cvc: string
   holder: string
+}
+
+/** One recorded gateway call — what went out, what came back, and how long it took. */
+export interface ApiLogEntry {
+  id: string
+  transaction_id: string
+  gateway_code: string
+  integration_type: 'hpp' | 'direct'
+  payment_mode: string
+  environment: string
+  merchant_reference: string
+  sequence: number
+  operation_name: string
+  normalized_operation: string
+  endpoint: string
+  http_method: string
+  started_at: string
+  completed_at: string | null
+  duration_ms: number
+  http_status: number | null
+  gateway_response_code: string | null
+  gateway_response_message: string | null
+  success: boolean
+  error_category: string | null
+  error_message: string | null
+  timed_out: boolean
+  is_setup_call: boolean
+  request_size_bytes: number | null
+  response_size_bytes: number | null
+  request_snippet: string | null
+  response_snippet: string | null
+}
+
+export interface LogSummary {
+  total: number
+  failed: number
+  gateways: { code: string; calls: number }[]
+  operations: string[]
+}
+
+export interface LogFilters {
+  gateway_code?: string[]
+  integration_type?: string
+  normalized_operation?: string
+  outcome?: string
+  transaction_id?: string
+  search?: string
+  limit?: number
+  offset?: number
 }

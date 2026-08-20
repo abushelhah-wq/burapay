@@ -317,26 +317,67 @@ class HppHandoff(BaseModel):
 
 
 class ThreeDsChallenge(BaseModel):
-    """What the browser needs to put the cardholder in front of their issuer.
+    """Where to send the cardholder to answer their issuer.
 
-    Either a URL to navigate to, or an auto-submitting form the issuer wants posted.
-    The form is rendered in a sandboxed frame rather than injected into the page: it
-    is markup this application received from somewhere else, and it belongs in its own
-    origin, not in ours.
+    Always a URL to navigate the whole window to, never markup to render in the page.
+    When the issuer gave a form rather than a URL, that is the address of a sandboxed
+    document that serves it — the markup came from somewhere else and belongs in its
+    own origin, not in ours, and a challenge that finishes inside a frame cannot return
+    the browser to us.
     """
 
     transaction_id: str
     gateway_code: str
     status: str
-    #: ``redirect`` when the issuer gave a URL, ``form`` when it gave markup to post.
+    #: ``redirect`` when the issuer gave a URL of its own, ``form`` when the URL points
+    #: at the sandboxed document this application serves. Either way, navigate to it.
     mode: str = Field(pattern="^(redirect|form)$")
     challenge_url: Optional[str] = None
-    challenge_html: Optional[str] = None
     #: Where the issuer sends the cardholder afterwards, and where the payment resumes.
     return_url: str
     amount: float
     currency: str
     environment: str
+
+
+class ApiLogEntry(BaseModel):
+    """One recorded gateway call, with the transaction it belonged to.
+
+    Both bodies are here, and both were sanitized before they were stored: a card
+    number is a last four, a CVV is gone by name, a secret is ``[redacted]``. There is
+    no unsanitized copy anywhere for this to be compared against — the scrubbing
+    happens on the way in, not on the way out.
+    """
+
+    id: str
+    transaction_id: str
+    gateway_code: str
+    integration_type: str
+    payment_mode: str
+    environment: str
+    merchant_reference: str
+    sequence: int
+    operation_name: str
+    normalized_operation: str
+    endpoint: str
+    http_method: str
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    duration_ms: float
+    http_status: Optional[int] = None
+    gateway_response_code: Optional[str] = None
+    gateway_response_message: Optional[str] = None
+    success: bool
+    error_category: Optional[str] = None
+    error_message: Optional[str] = None
+    timed_out: bool = False
+    #: Excluded from the gateway's reported API time. Recorded all the same, because a
+    #: setup call is still a call the gateway made you do.
+    is_setup_call: bool = False
+    request_size_bytes: Optional[int] = None
+    response_size_bytes: Optional[int] = None
+    request_snippet: Optional[str] = None
+    response_snippet: Optional[str] = None
 
 
 class BrowserMetricsIn(BaseModel):

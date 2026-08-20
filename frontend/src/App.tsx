@@ -9,6 +9,7 @@ import Dashboard from './pages/Dashboard'
 import Gateways from './pages/Gateways'
 import HppWidget from './pages/HppWidget'
 import Login from './pages/Login'
+import Logs from './pages/Logs'
 import MockCheckout from './pages/MockCheckout'
 import Reports from './pages/Reports'
 import RunBenchmark from './pages/RunBenchmark'
@@ -41,6 +42,7 @@ export default function App() {
         <Route path="comparison" element={<Comparison />} />
         <Route path="comparison-tests/:id" element={<ComparisonTestDetail />} />
         <Route path="reports" element={<Reports />} />
+        <Route path="logs" element={<Logs />} />
         <Route path="gateways" element={<Gateways />} />
         <Route path="settings" element={<Settings />} />
       </Route>

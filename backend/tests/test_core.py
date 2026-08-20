@@ -236,10 +236,11 @@ class TestFailedRequestSnippet:
         await client.client.aclose()
         return client.measurements[-1]
 
-    async def test_a_successful_call_keeps_no_request_body(self):
-        """Only failures need diagnosing, so only failures pay the storage cost."""
-        record = await self._measure(200, {"cardNumber": "4111111111111111"})
-        assert record.request_snippet is None
+    async def test_a_successful_call_keeps_its_request_too(self):
+        """A working call is the reference a broken one is compared against."""
+        record = await self._measure(200, {"sessionId": "s1"})
+        assert record.request_snippet is not None
+        assert "s1" in record.request_snippet
 
     async def test_a_rejected_call_keeps_what_was_sent(self):
         record = await self._measure(400, {"sessionId": "s1", "source": "DirectAPI"})
