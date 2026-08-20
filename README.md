@@ -639,7 +639,10 @@ To turn it on — sandbox test cards only:
 ```bash
 # on the VPS, in the deployment's .env
 ALLOW_DIRECT_CARD_ENTRY=true
-docker compose up -d --build api
+
+# the services are named backend and frontend; there is no "api" service
+docker compose up -d --build backend frontend
+docker compose exec backend printenv ALLOW_DIRECT_CARD_ENTRY   # confirm it took
 ```
 
 A **Card token ID** needs no such permission and is offered either way: a token is not
