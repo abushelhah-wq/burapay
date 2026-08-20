@@ -79,6 +79,20 @@ def _bounded_challenge(context: Mapping[str, Any]) -> dict:
     return values
 
 
+def _token_context(result: PaymentResult) -> dict:
+    """The reusable half of a payment: what a later charge would need to repeat it.
+
+    A token on its own is not enough on every gateway — Geidea also wants the
+    agreement the card was stored under — so the two travel together and are shown
+    together rather than leaving somebody to find the second half later.
+    """
+    values = {"stored_token": result.stored_token,
+              "stored_token_hint": result.stored_token_hint,
+              "agreement_id": result.agreement_id,
+              "agreement_type": result.agreement_type}
+    return {key: value for key, value in values.items() if value}
+
+
 def _guard_environment(environment: str) -> None:
     if environment != "sandbox" and not settings.allow_production_gateways:
         raise BenchmarkRefused(
@@ -203,7 +217,9 @@ async def run_direct_transaction(
         reference: Optional[str] = None, environment: str = "sandbox",
         benchmark_run_id: Optional[str] = None, methodology: str = "mixed",
         payment_mode: str = "standard", card: Optional[Card] = None,
-        token_id: Optional[str] = None) -> Transaction:
+        token_id: Optional[str] = None, agreement_id: Optional[str] = None,
+        initiated_by: Optional[str] = None,
+        browser: Optional[Mapping[str, Any]] = None) -> Transaction:
     """Run one Direct API transaction.
 
     Usually start to final state in this process. A gateway that stops for a 3DS
@@ -250,7 +266,11 @@ async def run_direct_transaction(
         description=description,
         return_url=f"{settings.public_base_url}/api/v1/transactions/{transaction.id}/return",
         webhook_url=f"{settings.public_base_url}/api/webhooks/{gateway_code}",
-        payment_mode=payment_mode, card=payment_card, token_id=token_id)
+        payment_mode=payment_mode, card=payment_card, token_id=token_id,
+        browser=dict(browser or {}),
+        metadata={key: value for key, value in
+                  (("agreement_id", agreement_id), ("initiated_by", initiated_by))
+                  if value})
 
     timer = TransactionTimer()
     transaction.started_at = timer.started_at
@@ -310,13 +330,13 @@ async def run_direct_transaction(
         timer.mark(TimelineEvent.AUTHORIZATION_RESPONSE)
         _apply_result(transaction, result)
         if result.stored_token:
-            # Shown on the transaction page for the operator to copy into Settings.
-            # Deliberately not written into the gateway's credentials by the platform:
-            # a card token belongs to a cardholder, and storing one automatically is
-            # not a decision this application should make on someone's behalf.
+            # Shown on the transaction page for the operator to copy into Settings or
+            # straight into the next payment. Deliberately not written into the
+            # gateway's credentials by the platform: a card token belongs to a
+            # cardholder, and storing one automatically is not a decision this
+            # application should make on someone's behalf.
             transaction.context = {**(transaction.context or {}),
-                                   "stored_token": result.stored_token,
-                                   "stored_token_hint": result.stored_token_hint}
+                                   **_token_context(result)}
         timer.mark(TimelineEvent.FINAL_STATUS_CONFIRMED, status=result.status.value)
     except Exception as exc:                              # noqa: BLE001 - every failure is data
         timer.mark(TimelineEvent.ERROR, label=type(exc).__name__)
@@ -485,8 +505,7 @@ async def _complete_second_leg(
         result = await confirm(adapter, client, request, adapter_context)
         _apply_result(transaction, result)
         if result.stored_token:
-            transaction.context = {**context, "stored_token": result.stored_token,
-                                   "stored_token_hint": result.stored_token_hint}
+            transaction.context = {**context, **_token_context(result)}
         timer.mark_at(TimelineEvent.FINAL_STATUS_CONFIRMED,
                       return_offset_ms + (time.perf_counter() - confirm_started) * 1000.0,
                       status=result.status.value)

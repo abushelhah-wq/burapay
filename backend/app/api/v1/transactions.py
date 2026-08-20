@@ -83,12 +83,15 @@ async def start_transaction(payload: StartTransactionRequest,
                 currency=payload.currency, description=payload.description,
                 reference=payload.reference, environment=payload.environment,
                 methodology=payload.methodology, payment_mode=payload.payment_mode,
-                card=card, token_id=payload.token_id)
+                card=card, token_id=payload.token_id,
+                agreement_id=payload.agreement_id, initiated_by=payload.initiated_by,
+                browser=payload.browser.model_dump() if payload.browser else None)
             context = transaction.context or {}
             return StartTransactionResponse(
                 transaction_id=transaction.id, status=transaction.status,
                 gateway_reference=transaction.gateway_transaction_id,
                 stored_token=context.get("stored_token"),
+                agreement_id=context.get("agreement_id"),
                 requires_customer_action=bool(context.get("awaiting_customer_action")),
                 redirect_url=(context.get("action_url")
                               if context.get("awaiting_customer_action") else None),

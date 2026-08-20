@@ -81,6 +81,14 @@ class PaymentRequest:
     #: standard | store_card | token. Adapters that declare only "standard" can
     #: ignore it.
     payment_mode: str = "standard"
+    #: What the browser that started this could see about itself — user agent,
+    #: language, time-zone offset. 3DS risk engines ask for it, and a server-to-server
+    #: call cannot know it, so the front end forwards it. Never a credential, never
+    #: anything identifying beyond what any web request already carries.
+    browser: Dict[str, Any] = field(default_factory=dict)
+    #: Per-payment options an adapter may need that are not credentials: the agreement
+    #: a card is being stored under, whether a stored-card charge is merchant- or
+    #: customer-initiated.
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -124,6 +132,10 @@ class PaymentResult:
     #: cardholder rather than to the merchant account.
     stored_token: Optional[str] = None
     stored_token_hint: Optional[str] = None
+    #: The agreement the token was stored under, where the gateway works that way. A
+    #: later charge needs both, so both travel together and are shown together.
+    agreement_id: Optional[str] = None
+    agreement_type: Optional[str] = None
 
     @property
     def succeeded(self) -> bool:

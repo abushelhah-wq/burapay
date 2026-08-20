@@ -45,6 +45,24 @@ class CardIn(BaseModel):
         return value
 
 
+class BrowserContext(BaseModel):
+    """What the browser that started a payment could see about itself.
+
+    3-D Secure risk engines score a payment partly on this, and an issuer given none of
+    it reaches for a challenge more often. A server-to-server call cannot know any of
+    it, so the front end sends what it has. Nothing here is more identifying than what
+    an ordinary web request already carries, and anything the browser could not see is
+    left out rather than invented.
+    """
+
+    user_agent: Optional[str] = Field(default=None, max_length=500)
+    language: Optional[str] = Field(default=None, max_length=35)
+    time_zone_offset_minutes: Optional[int] = Field(default=None, ge=-1440, le=1440)
+    #: A per-browser identifier the front end generates. Not a fingerprint and not tied
+    #: to a person — just something stable enough for a gateway to correlate on.
+    device_id: Optional[str] = Field(default=None, max_length=100)
+
+
 class StartTransactionRequest(BaseModel):
     """A single transaction started from the UI (steps 1-3 of the user journey)."""
 
@@ -69,6 +87,17 @@ class StartTransactionRequest(BaseModel):
     #: accepted — a token is not card data — and the only way to run a Direct payment
     #: on an account that is not cleared to receive raw card numbers.
     token_id: Optional[str] = Field(default=None, max_length=200)
+    #: The agreement a stored card is charged under, or stored against. On Geidea the
+    #: merchant chooses this value rather than the gateway issuing one; a Store card
+    #: payment mints one when it is left blank.
+    agreement_id: Optional[str] = Field(default=None, max_length=200)
+    #: Merchant for an unattended charge (MIT), Customer when the cardholder is present
+    #: and picking a saved card (CIT). The card networks treat the two differently, so
+    #: it belongs to the payment rather than to the account.
+    initiated_by: Optional[str] = Field(default=None, pattern="^(Merchant|Customer)$")
+    #: What the browser can see about itself. 3DS risk engines ask for it and a
+    #: server-to-server call cannot know it, so the front end forwards it.
+    browser: Optional[BrowserContext] = None
 
 
 class StartTransactionResponse(BaseModel):
@@ -86,6 +115,9 @@ class StartTransactionResponse(BaseModel):
     #: True when a Direct payment stopped for a 3DS challenge. ``redirect_url`` then
     #: says where to send the cardholder, exactly as it does for hosted checkout.
     requires_customer_action: bool = False
+    #: The agreement a minted token was stored under. Useless without the token and
+    #: vice versa, so the two are returned together.
+    agreement_id: Optional[str] = None
 
 
 class BenchmarkRunCreate(BaseModel):
@@ -249,6 +281,10 @@ class TransactionDetail(BaseModel):
     #: because a card token belongs to a cardholder rather than to the merchant.
     stored_token: Optional[str] = None
     stored_token_hint: Optional[str] = None
+    #: The agreement the token was stored under, where the gateway needs one. A later
+    #: charge needs both halves, so both are shown.
+    agreement_id: Optional[str] = None
+    agreement_type: Optional[str] = None
     #: True while the payment is parked on a 3DS challenge, so the page can offer a way
     #: back into it instead of showing a PENDING row with no explanation.
     awaiting_customer_action: bool = False

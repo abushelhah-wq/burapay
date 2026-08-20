@@ -454,6 +454,10 @@ async def transaction_detail(session: AsyncSession, transaction: Transaction) ->
         # it into the gateway's settings; never written there automatically.
         "stored_token": (transaction.context or {}).get("stored_token"),
         "stored_token_hint": (transaction.context or {}).get("stored_token_hint"),
+        # Geidea needs the agreement as well as the token to charge the card again,
+        # and showing one without the other sends people looking for the missing half.
+        "agreement_id": (transaction.context or {}).get("agreement_id"),
+        "agreement_type": (transaction.context or {}).get("agreement_type"),
         # Set while a payment is parked on a 3DS challenge, so the transaction page can
         # offer a way back into it rather than showing a PENDING row and no explanation.
         "awaiting_customer_action": bool(

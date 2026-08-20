@@ -16,6 +16,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { api, ApiError } from '../api/client'
 import type { AppSettings, Gateway } from '../api/types'
 import { Badge, Card, ErrorNotice, Note, Spinner } from '../components/ui'
+import { browserContext } from '../lib/browserContext'
 import { markRedirect } from '../lib/browserMetrics'
 import { PAYMENT_MODE_HINTS, PAYMENT_MODE_LABELS, integrationLabel } from '../lib/format'
 
@@ -52,6 +53,11 @@ export default function RunBenchmark() {
   const [cardCvc, setCardCvc] = useState('')
   const [cardHolder, setCardHolder] = useState('BuraPay Benchmark')
   const [tokenId, setTokenId] = useState('')
+  const [agreementId, setAgreementId] = useState('')
+  // Merchant-initiated is the unattended charge; customer-initiated is the cardholder
+  // picking a saved card. The card networks treat them differently, so it belongs to
+  // the payment rather than to the account.
+  const [initiatedBy, setInitiatedBy] = useState<'Merchant' | 'Customer'>('Merchant')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
 
@@ -117,6 +123,13 @@ export default function RunBenchmark() {
         cvc: cardCvc, holder: cardHolder || 'BuraPay Benchmark',
       } : undefined,
       token_id: integration === 'direct' && tokenId.trim() ? tokenId.trim() : undefined,
+      agreement_id: integration === 'direct' && agreementId.trim()
+        ? agreementId.trim() : undefined,
+      initiated_by: integration === 'direct' && paymentMode === 'token'
+        ? initiatedBy : undefined,
+      // 3DS risk engines score a payment partly on the browser it came from. The
+      // server cannot see any of this, so the page forwards what it can.
+      browser: integration === 'direct' ? browserContext() : undefined,
     })
     if (result.requires_customer_action && result.redirect_url) {
       // The issuer wants the cardholder — a 3DS challenge or an OTP. Everything from
@@ -335,20 +348,20 @@ export default function RunBenchmark() {
               {paymentMode === 'token' && !tokenReady && (
                 <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3
                               text-xs text-amber-800">
-                  {selected?.name} has no stored card configured yet. A stored-token
-                  payment needs both a <strong>Card token ID</strong> and an{' '}
-                  <strong>Agreement ID</strong> on its settings. Run a{' '}
-                  <strong>Store card (tokenize)</strong> payment first — the token it
-                  returns is shown on the transaction page, ready to paste in.{' '}
+                  {selected?.name} has no stored card in its settings. Paste a{' '}
+                  <strong>Card token ID</strong> and an <strong>Agreement ID</strong>{' '}
+                  into the payment details below, or save them on the{' '}
                   <Link to={`/settings?gateway=${selected?.code}`}
-                        className="font-medium underline">Open settings</Link>
+                        className="font-medium underline">settings page</Link>{' '}
+                  to stop typing them. Both come back from a{' '}
+                  <strong>Store card (tokenize)</strong> payment.
                 </p>
               )}
               {paymentMode === 'store_card' && (
                 <p className="mt-3 text-xs text-ink-500">
-                  This pays and stores the card. The token and agreement come back on
-                  the transaction page; paste them into the gateway’s settings to charge
-                  the card again later without card details.
+                  This pays and asks the gateway to keep the card. The token and the
+                  agreement come back on the transaction page, ready to paste into a
+                  stored-token charge — merchant-initiated or customer-initiated.
                 </p>
               )}
             </div>
@@ -367,28 +380,79 @@ export default function RunBenchmark() {
         </Card>
 
         {/* Step 3 — payment details, for the integration that needs them */}
-        {mode === 'single' && integration === 'direct' && paymentMode !== 'token' && (
+        {mode === 'single' && integration === 'direct' && (
           <Card title="3 · Payment details">
             <p className="text-sm text-ink-500">
-              Direct API sends the payment server-to-server, so this application has to
-              be given something to charge. Either works: a sandbox test card, or a card
-              token the gateway already holds.
+              {paymentMode === 'token'
+                ? 'A stored-token payment sends no card details at all — that is the '
+                  + 'point of it. It needs the token and the agreement the card was '
+                  + 'stored under, both of which came back from the payment that stored it.'
+                : 'Direct API sends the payment server-to-server, so this application '
+                  + 'has to be given something to charge.'}
             </p>
 
-            <div className="mt-5">
-              <label className="label" htmlFor="token_id">Card token ID</label>
-              <input id="token_id" className="input font-mono" value={tokenId}
-                     autoComplete="off"
-                     placeholder="Paste a token to pay without entering a card"
-                     onChange={(e) => setTokenId(e.target.value)} />
-              <p className="hint">
-                A token is not card data, so this always works — including on an account
-                that is not cleared to receive card numbers. A{' '}
-                <strong>Store card (tokenize)</strong> payment mints one, and it is shown
-                on that transaction’s page.
-              </p>
+            <div className="mt-5 grid gap-4 sm:grid-cols-2">
+              <div>
+                <label className="label" htmlFor="token_id">Card token ID</label>
+                <input id="token_id" className="input font-mono" value={tokenId}
+                       autoComplete="off"
+                       placeholder={paymentMode === 'token'
+                         ? 'Falls back to the token in Settings'
+                         : 'Paste a token to pay without entering a card'}
+                       onChange={(e) => setTokenId(e.target.value)} />
+                <p className="hint">
+                  A token is not card data, so this always works — including on an
+                  account that is not cleared to receive card numbers.
+                </p>
+              </div>
+              <div>
+                <label className="label" htmlFor="agreement_id">Agreement ID</label>
+                <input id="agreement_id" className="input font-mono" value={agreementId}
+                       autoComplete="off"
+                       placeholder={paymentMode === 'store_card'
+                         ? 'Generated for you when blank'
+                         : 'The agreement the card was stored under'}
+                       onChange={(e) => setAgreementId(e.target.value)} />
+                <p className="hint">
+                  {paymentMode === 'store_card'
+                    ? 'You choose this value — Geidea does not issue one. Left blank, '
+                      + 'one is generated and shown next to the token afterwards.'
+                    : 'The same value that was used when the card was stored. A token '
+                      + 'without its agreement will be refused.'}
+                </p>
+              </div>
             </div>
 
+            {paymentMode === 'token' && (
+              <div className="mt-6 border-t border-ink-200 pt-6">
+                <p className="label">Who is initiating this charge?</p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {([['Merchant', 'Merchant-initiated (MIT)',
+                      'An unattended charge — a subscription renewal, a retry. Nobody is watching.'],
+                    ['Customer', 'Customer-initiated (CIT)',
+                      'The cardholder is here, picking a card they saved earlier.']] as const)
+                    .map(([value, label, hint]) => (
+                      <button key={value} type="button"
+                              onClick={() => setInitiatedBy(value)}
+                              className={`rounded-xl border p-3 text-left transition
+                                ${initiatedBy === value
+                                  ? 'border-accent-500 bg-accent-50 ring-1 ring-accent-500'
+                                  : 'border-ink-200 bg-white hover:border-ink-300'}`}>
+                        <span className="block text-sm font-semibold text-ink-900">{label}</span>
+                        <span className="mt-1 block text-xs text-ink-500">{hint}</span>
+                      </button>
+                    ))}
+                </div>
+                <p className="hint mt-3">
+                  The card networks price and authorise these differently, so it is a
+                  property of the payment rather than of the account. Geidea spells the
+                  customer-initiated case <span className="font-mono">Internet</span> on
+                  the wire.
+                </p>
+              </div>
+            )}
+
+            {paymentMode !== 'token' && (
             <div className="mt-6 border-t border-ink-200 pt-6">
               <div className="flex items-center justify-between gap-3">
                 <p className="label mb-0">Card details</p>
@@ -475,11 +539,12 @@ export default function RunBenchmark() {
                 </p>
               )}
             </div>
+            )}
           </Card>
         )}
 
         {/* Step 4 — transaction details */}
-        <Card title={mode === 'single' && integration === 'direct' && paymentMode !== 'token'
+        <Card title={mode === 'single' && integration === 'direct'
                        ? '4 · Transaction details' : '3 · Transaction details'}>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <div>

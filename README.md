@@ -348,20 +348,19 @@ with a four-call card payment would describe neither.
 | ---- | ------------ | ----- |
 | Standard card payment | A one-off payment with card details | 4 (3 when frictionless) |
 | Store card (tokenize) | Pays *and* asks Geidea to keep the card, returning a token | 4, plus the token |
-| Stored token (merchant-initiated) | Charges the stored card. No card details, so nothing to authenticate | 2 — Geidea still needs a fresh session per charge |
+| Stored token | Charges the stored card, MIT or CIT. No card details, so nothing to authenticate | 2 — Geidea still needs a fresh session per charge |
 
 The round trip:
 
-1. **Settings → Geidea** — fill in **Agreement ID** and **Agreement type** if Geidea has
-   already given you an agreement. **Initiated by** is `Merchant` for an unattended
-   recurring charge, `Customer` when the cardholder is present and picking a saved card.
-2. **Run Benchmark → Geidea → Direct API → Store card (tokenize)** and run one payment.
-3. The transaction page shows the **card token** it minted, with a copy button.
-4. Paste that token into **Settings → Geidea → Card token ID**.
-5. **Stored token (merchant-initiated)** is now selectable and will charge that card.
+1. **Run Benchmark → Geidea → Direct API → Store card (tokenize)**, enter a sandbox
+   test card, and run one payment. Leave **Agreement ID** blank and one is minted.
+2. The transaction page shows **Charge this card again** — the card token and the
+   agreement id, each with a copy button.
+3. **Stored token** mode, paste both into the payment form, pick **MIT** or **CIT**, and
+   run it. Or save them on **Settings → Geidea** to stop typing them.
 
-Until both the token and the agreement are stored, the stored-token mode says exactly
-what is missing and links to the page that fixes it, rather than failing at the gateway.
+Nothing has to go through Settings: the payment form takes both directly, so a token
+minted a minute ago can be charged without a detour.
 
 The platform never writes a minted token into the gateway's credentials by itself. A
 card token belongs to a cardholder rather than to the merchant account, and storing one
@@ -373,29 +372,62 @@ none of them set.
 
 ### Paying by Direct API: what to enter, and where
 
-Geidea's Direct API authenticates and pays against a **card token**, never against a
-card number. Hand Initiate Authentication a card and it answers `responseCode=100`
-"General error" with `detailedResponseCode=069` — *Missing Token Id*. So the adapter
-exchanges a typed card for a token first, on `POST /pgw/api/v1/direct/tokenize`, and
-every call after that carries the token:
+Geidea's Direct API is four calls, and the three that carry a card **do not agree on
+shape**:
 
-    session -> tokenize -> initiate authentication -> authenticate payer -> pay
+    POST /payment-intent/api/v2/direct/session
+    POST /pgw/api/v6/direct/authenticate/initiate   cardNumber at the top level
+    POST /pgw/api/v6/direct/authenticate/payer      card nested under paymentMethod
+    POST /pgw/api/v2/direct/pay                     card optional; threeDSecureId binds it
 
-The PAN therefore appears on exactly one call, and on none at all if you supply a token
-instead. That tokenize call is **timed, not treated as setup**: it is a round trip the
-payment genuinely cannot happen without on this gateway, and hiding it would flatter
-Geidea against gateways that accept a card on the authorisation call itself.
+That difference is not cosmetic. Sending Initiate Authentication a `paymentMethod`
+object — the shape the *next two* calls want — means Geidea finds neither a card number
+nor a token where it looks for them, and answers `responseCode=100` "General error"
+with `detailedResponseCode=069` **Missing Token Id**. The error names the token half of
+a check that failed for want of a card, which is why it reads as though a token were
+missing when the real problem is a misplaced card number.
 
-**Run Benchmark → Direct API** now has a *Payment details* step with two ways to pay:
+`expiryDate` is an object with a **two-digit** year — `{"month": 12, "year": 30}` — not
+`expiryMonth` / `expiryYear`.
 
-* **Card token ID** — always available. A token is not card data, so this works even on
-  an account that is not cleared to receive card numbers, which most sandbox accounts
-  are not. A **Store card (tokenize)** payment mints one.
-* **Card details** — a sandbox test card, typed in. Only shown when
-  `ALLOW_DIRECT_CARD_ENTRY=true`; see [Card entry](#card-entry) below.
+**Run Benchmark → Direct API** has a *Payment details* step:
 
-Leave both blank and the test card from **Settings** is used, which is what an
-automated benchmark run does.
+* **Card details** — a sandbox test card. Only shown when `ALLOW_DIRECT_CARD_ENTRY=true`;
+  see [Card entry](#card-entry).
+* **Card token ID** — always available. A token is not card data, so it works on an
+  account not cleared to receive card numbers.
+* **Agreement ID** — the agreement a stored card is charged under.
+
+The browser also sends its user agent, language and time-zone offset, because 3DS risk
+engines score a payment partly on those and a server-to-server call cannot see them. An
+issuer given none of it challenges more often. Whatever the browser could not see is
+left out rather than invented.
+
+### Tokens, and charging a card again (MIT / CIT)
+
+**There is no tokenize endpoint.** A token is minted *by a payment*: the session carries
+`cardOnFile: true` and a `cofAgreement`, and the token comes back on the successful
+payment. That initial payment is customer-initiated and must complete 3DS.
+
+**The agreement ID is yours, not Geidea's.** You choose the value, send it on the
+card-on-file payment, and quote the same value on every later charge. Leave the field
+blank on a **Store card (tokenize)** payment and this platform mints one for you.
+
+Any payment that returns a token shows it — not only the mode named "store card". The
+transaction page has a **Charge this card again** panel with both halves and a copy
+button each. Both are needed: a token without its agreement is refused, and the
+agreement is a value this platform chose, so there is nowhere else to look it up.
+
+A stored-card charge goes to `POST /pgw/api/v2/direct/pay/token` and asks who is
+initiating it:
+
+| Choice | Sent as | When |
+| ------ | ------- | ---- |
+| Merchant-initiated (MIT) | `initiatedBy: "Merchant"` | An unattended charge — a subscription renewal, a retry. Nobody is watching. |
+| Customer-initiated (CIT) | `initiatedBy: "Internet"` | The cardholder is here, picking a card they saved earlier. |
+
+The card networks price and authorise those differently, so it is chosen per payment on
+the form rather than fixed in settings. Settings holds the default.
 
 ### 3-D Secure: the payment stops for the cardholder
 
@@ -412,6 +444,12 @@ status. **Only the two server legs count as gateway API time.** The OTP, the iss
 page and the round trip through the browser land in `customer_interaction_time_ms`,
 where they can neither flatter nor penalise the gateway. A payment left waiting shows a
 *Continue verification* link on its transaction page.
+
+The card **does not survive the pause**. It is not written down, not held between
+requests and not put in the transaction's context, so the Pay call on the way back
+identifies the payment by `sessionId`, `orderId` and `threeDSecureId` instead — which
+Geidea already holds the card against. Holding card data across two requests to avoid
+that would be the wrong trade.
 
 ---
 

@@ -2,7 +2,8 @@ from app.schemas.auth import (LoginRequest, PasswordChange, TokenResponse, UserC
                               UserOut)
 from app.schemas.benchmarks import (ApiMeasurementOut, BenchmarkRunCreate,
                                     BenchmarkRunDetail, BenchmarkRunOut,
-                                    BrowserMeasurementOut, BrowserMetricsIn, CardIn,
+                                    BrowserContext, BrowserMeasurementOut, BrowserMetricsIn,
+                                    CardIn,
                                     ComparisonTestCreate, ComparisonTestOut, HppHandoff,
                                     StartTransactionRequest, StartTransactionResponse,
                                     ThreeDsChallenge, TransactionDetail, TransactionEventOut, TransactionOut)
@@ -14,7 +15,8 @@ from app.schemas.gateways import (CredentialFieldOut, CredentialUpdate, Credenti
 
 __all__ = [
     "ApiMeasurementOut", "BenchmarkRunCreate", "BenchmarkRunDetail", "BenchmarkRunOut",
-    "BrowserMeasurementOut", "BrowserMetricsIn", "CardIn", "ComparisonTestCreate",
+    "BrowserContext", "BrowserMeasurementOut", "BrowserMetricsIn", "CardIn",
+    "ComparisonTestCreate",
     "ComparisonTestOut", "CredentialFieldOut", "CredentialUpdate", "CredentialsOut",
     "ErrorResponse", "GatewayDetail", "GatewayHealthOut", "GatewayOut", "GatewayUpdate",
     "HppHandoff",

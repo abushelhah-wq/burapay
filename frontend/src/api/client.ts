@@ -148,7 +148,8 @@ export const api = {
   startTransaction: (payload: Record<string, unknown>) =>
     request<{ transaction_id: string; status: string; redirect_url: string | null;
       mode: string | null; gateway_reference: string | null;
-      stored_token: string | null; requires_customer_action: boolean }>(
+      stored_token: string | null; requires_customer_action: boolean;
+      agreement_id: string | null }>(
       '/v1/transactions/start', { method: 'POST', body: JSON.stringify(payload) }),
   threeDsChallenge: (id: string) =>
     request<ThreeDsChallenge>(`/v1/transactions/${id}/three-ds`),

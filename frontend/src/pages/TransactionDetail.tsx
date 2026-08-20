@@ -153,30 +153,45 @@ export default function TransactionDetail() {
       )}
 
       {detail.stored_token && (
-        <Card title="Card token">
+        <Card title="Charge this card again">
           <p className="text-sm text-ink-700">
-            This payment stored the card. Paste the token into{' '}
+            This payment left a reusable card behind. Paste these into the{' '}
+            <Link to="/run" className="text-accent-600 hover:underline">
+              payment form
+            </Link>{' '}
+            for a stored-token charge — merchant-initiated or customer-initiated — or
+            into{' '}
             <Link to={`/settings?gateway=${transaction.gateway_code}`}
                   className="text-accent-600 hover:underline">
               {transaction.gateway_code}’s settings
             </Link>{' '}
-            to charge it again later without card details.
+            to make them the default.
           </p>
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <code className="select-all break-all rounded-lg border border-ink-200
-                             bg-ink-50 px-3 py-2 font-mono text-sm text-ink-800">
-              {detail.stored_token}
-            </code>
-            <button type="button" className="btn-secondary"
-                    onClick={() => navigator.clipboard?.writeText(detail.stored_token ?? '')}>
-              Copy
-            </button>
-            {detail.stored_token_hint && (
-              <span className="text-xs text-ink-500">{detail.stored_token_hint}</span>
+
+          <dl className="mt-4 space-y-3">
+            <CopyRow label="Card token ID" value={detail.stored_token}
+                     hint={detail.stored_token_hint} />
+            {detail.agreement_id && (
+              <CopyRow label="Agreement ID" value={detail.agreement_id}
+                       hint={detail.agreement_type
+                         ? `${detail.agreement_type} agreement`
+                         : undefined} />
             )}
-          </div>
-          <p className="mt-3 text-xs text-ink-500">
-            Shown here and nowhere else. The platform does not save it into the
+          </dl>
+
+          {detail.agreement_id ? (
+            <p className="mt-3 text-xs text-ink-500">
+              Both are needed. A token without the agreement it was stored under will be
+              refused, and the agreement is a value this platform chose — the gateway
+              does not issue one, so there is nowhere else to look it up.
+            </p>
+          ) : (
+            <p className="mt-3 text-xs text-ink-500">
+              This gateway charges a stored token without a separate agreement.
+            </p>
+          )}
+          <p className="mt-2 text-xs text-ink-500">
+            Shown here and nowhere else. The platform does not save the token into the
             gateway’s credentials on its own: a card token belongs to a cardholder, not
             to the merchant account, and storing one is a decision to make deliberately.
           </p>
@@ -399,6 +414,32 @@ export default function TransactionDetail() {
           )}
         </Card>
       </div>
+    </div>
+  )
+}
+
+/** One copyable value: the label, the value in a mono box, and a copy button. */
+function CopyRow({ label, value, hint }: {
+  label: string
+  value: string
+  hint?: string | null
+}) {
+  return (
+    <div>
+      <dt className="text-xs font-semibold uppercase tracking-wide text-ink-500">
+        {label}
+      </dt>
+      <dd className="mt-1 flex flex-wrap items-center gap-3">
+        <code className="select-all break-all rounded-lg border border-ink-200
+                         bg-ink-50 px-3 py-2 font-mono text-sm text-ink-800">
+          {value}
+        </code>
+        <button type="button" className="btn-secondary"
+                onClick={() => navigator.clipboard?.writeText(value)}>
+          Copy
+        </button>
+        {hint && <span className="text-xs text-ink-500">{hint}</span>}
+      </dd>
     </div>
   )
 }

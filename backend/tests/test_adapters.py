@@ -190,21 +190,23 @@ class TestGeidea:
                                         "hpp_url": "https://custom.test/x.js"}
                              )._hpp_script_url() == "https://custom.test/x.js"
 
-    async def test_direct_tokenizes_the_card_then_runs_the_documented_four(self):
-        """A typed card is exchanged for a token first; everything after uses the token.
+    async def test_direct_sends_each_call_the_shape_it_documents(self):
+        """The three card-bearing calls disagree, and getting that wrong is error 069.
 
-        Geidea answers Initiate Authentication with detailed code 069 "Missing Token
-        Id" when it is handed card details, so the token is not optional.
+        Initiate Authentication wants a bare cardNumber at the top level. Authenticate
+        Payer and Pay want it nested under paymentMethod with the expiry as an object.
+        Sending the nested shape to the first one is what produced
+        detailedResponseCode=069 "Missing Token Id" against the live sandbox.
         """
         adapter = self.adapter()
         requests: List[httpx.Request] = []
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "sess_1"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
-            "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
-                                                                "status": "challenge"}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "000", "status": "challenge",
+                "order": {"orderId": "ord_1"},
+                "threeDSecure": {"threeDSecureId": "tds_1"}}),
             "/authenticate/payer": httpx.Response(200, json={"responseCode": "000"}),
             "/direct/pay": httpx.Response(200, json={"responseCode": "000",
                                                      "order": {"orderId": "ord_1",
@@ -212,46 +214,74 @@ class TestGeidea:
         }), requests)
         result = await adapter.process_direct_payment(client, request_for())
         assert result.status is TransactionStatus.SUCCESS
-        assert result.gateway_reference == "ord_1"
-        # session + tokenize + initiate + payer + pay
-        assert len(client.timed_measurements) == 5
+        assert len(client.timed_measurements) == 4
 
-        # The PAN goes to exactly one call, and every later call carries the token.
-        bodies = [json.loads(r.content) for r in requests]
-        assert bodies[1]["paymentMethod"]["cardNumber"] == CARD.number
-        assert "paymentMethod" not in bodies[2] and bodies[2]["tokenId"] == "tok_new"
-        assert bodies[3]["tokenId"] == "tok_new"
-        assert bodies[4]["tokenId"] == "tok_new"
+        initiate, payer, pay = [json.loads(r.content) for r in requests[1:]]
+
+        # Initiate: flat, and nothing nested.
+        assert initiate["cardNumber"] == CARD.number
+        assert "paymentMethod" not in initiate
+        assert initiate["sessionId"] == "sess_1"
+        assert initiate["source"] == "Web"
+
+        # Payer and Pay: nested, with the expiry as an object and a two-digit year.
+        for body in (payer, pay):
+            assert body["paymentMethod"]["cardNumber"] == CARD.number
+            assert body["paymentMethod"]["expiryDate"] == {"month": 12, "year": 30}
+            assert body["paymentMethod"]["cvv"] == CARD.cvc
+            assert "expiryMonth" not in body["paymentMethod"]
+
+        # The 3DS id read off Initiate is what binds the authentication to the payment.
+        assert payer["orderId"] == "ord_1"
+        assert pay["threeDSecureId"] == "tds_1"
         await client.client.aclose()
 
-    async def test_a_supplied_token_skips_tokenization_entirely(self):
-        """Paste a token and the card number never enters this application at all."""
+    async def test_browser_data_reaches_the_3ds_calls(self):
+        """A server cannot know the cardholder's user agent, so the browser sends it."""
         adapter = self.adapter()
         requests: List[httpx.Request] = []
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
-                                                         "session": {"id": "sess_1"}}),
+                                                         "session": {"id": "s"}}),
             "/authenticate/initiate": httpx.Response(200, json={
                 "responseCode": "000", "status": "Not Enrolled"}),
             "/direct/pay": httpx.Response(200, json={"responseCode": "000",
-                                                     "order": {"orderId": "ord_1",
+                                                     "order": {"orderId": "o",
                                                                "status": "Success"}}),
         }), requests)
-        result = await adapter.process_direct_payment(
-            client, request_for(card=None, token_id="tok_pasted"))
-        assert result.status is TransactionStatus.SUCCESS
-        assert len(client.timed_measurements) == 3
-        assert all("cardNumber" not in r.content.decode() for r in requests)
-        assert json.loads(requests[1].content)["tokenId"] == "tok_pasted"
+        await adapter.process_direct_payment(client, request_for(browser={
+            "user_agent": "Mozilla/5.0 (X11)", "language": "en-GB",
+            "time_zone_offset_minutes": -180}))
+        device = json.loads(requests[1].content)["deviceIdentification"]
+        assert device["userAgent"] == "Mozilla/5.0 (X11)"
+        assert device["language"] == "en-GB"
+        assert device["providerDeviceId"]
         await client.client.aclose()
 
-    async def test_direct_with_neither_a_card_nor_a_token_says_so(self):
+    async def test_what_the_browser_could_not_see_is_left_out_not_invented(self):
+        adapter = self.adapter()
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s"}}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "000", "status": "Not Enrolled"}),
+            "/direct/pay": httpx.Response(200, json={"responseCode": "000",
+                                                     "order": {"orderId": "o",
+                                                               "status": "Success"}}),
+        }), requests)
+        await adapter.process_direct_payment(client, request_for())
+        device = json.loads(requests[1].content)["deviceIdentification"]
+        assert "userAgent" not in device and "language" not in device
+        await client.client.aclose()
+
+    async def test_direct_without_a_card_says_so(self):
         from app.core.errors import GatewayError
         adapter = self.adapter()
         client = client_for(adapter, route({}))
         with pytest.raises(GatewayError) as excinfo:
             await adapter.process_direct_payment(client, request_for(card=None))
-        assert "card details or a card token id" in str(excinfo.value)
+        assert "needs card details" in str(excinfo.value)
         await client.client.aclose()
 
     async def test_a_3ds_challenge_pauses_instead_of_paying(self):
@@ -260,12 +290,11 @@ class TestGeidea:
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "sess_1"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
-            "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
-                                                                "status": "challenge"}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "000", "status": "challenge",
+                "order": {"orderId": "ord_1"}}),
             "/authenticate/payer": httpx.Response(200, json={
-                "responseCode": "000",
+                "responseCode": "000", "threeDSecureId": "tds_9",
                 "threeDSecure": {"redirectUrl": "https://issuer.test/acs?tx=1"}}),
             "/direct/pay": httpx.Response(200, json={"responseCode": "000",
                                                      "order": {"orderId": "ord_1",
@@ -276,9 +305,26 @@ class TestGeidea:
         assert result.three_ds_required is True
         assert result.status is TransactionStatus.PENDING
         assert result.action_url == "https://issuer.test/acs?tx=1"
-        assert result.context["token_id"] == "tok_new"
+        assert result.context["three_ds_id"] == "tds_9"
         # Pay was not called: the session has not been authenticated yet.
-        assert len(client.timed_measurements) == 4
+        assert len(client.timed_measurements) == 3
+        await client.client.aclose()
+
+    async def test_the_paused_payment_keeps_no_card_anywhere(self):
+        """Section 25. The pause spans two requests, and card data must not."""
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s"}}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "000", "status": "challenge"}),
+            "/authenticate/payer": httpx.Response(200, json={
+                "responseCode": "000", "redirectUrl": "https://issuer.test/acs"}),
+        }))
+        result = await adapter.process_direct_payment(client, request_for())
+        blob = json.dumps(result.context)
+        assert CARD.number not in blob
+        assert CARD.cvc not in blob
         await client.client.aclose()
 
     async def test_an_auto_submitting_form_is_a_challenge_too(self):
@@ -286,8 +332,6 @@ class TestGeidea:
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "s"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
             "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
                                                                 "status": "challenge"}),
             "/authenticate/payer": httpx.Response(200, json={
@@ -300,18 +344,25 @@ class TestGeidea:
         assert "issuer.test" in result.context["challenge_html"]
         await client.client.aclose()
 
-    async def test_the_resume_leg_pays_and_times_only_that_call(self):
+    async def test_the_resume_leg_pays_without_re_sending_the_card(self):
         adapter = self.adapter()
+        requests: List[httpx.Request] = []
         client = client_for(adapter, route({
             "/direct/pay": httpx.Response(200, json={"responseCode": "000",
                                                      "order": {"orderId": "ord_1",
                                                                "status": "Success"}}),
-        }))
+        }), requests)
         result = await adapter.complete_direct_payment(
-            client, request_for(), {"session_id": "s", "token_id": "tok_new"}, {})
+            client, request_for(card=None),
+            {"session_id": "s", "order_id": "ord_1", "three_ds_id": "tds_9"}, {})
         assert result.status is TransactionStatus.SUCCESS
         assert result.three_ds_required is True
         assert len(client.timed_measurements) == 1
+
+        body = json.loads(requests[0].content)
+        assert "paymentMethod" not in body
+        assert body["threeDSecureId"] == "tds_9"
+        assert body["orderId"] == "ord_1"
         await client.client.aclose()
 
     async def test_the_resume_leg_refuses_without_the_paused_session(self):
@@ -322,31 +373,12 @@ class TestGeidea:
             await adapter.complete_direct_payment(client, request_for(), {}, {})
         await client.client.aclose()
 
-    async def test_a_tokenize_refusal_says_what_to_do_instead(self):
-        """Most sandbox accounts cannot receive raw card numbers. Say so, plainly."""
-        from app.core.errors import GatewayError
-        adapter = self.adapter()
-        client = client_for(adapter, route({
-            "/direct/session": httpx.Response(200, json={"responseCode": "000",
-                                                         "session": {"id": "s"}}),
-            "/direct/tokenize": httpx.Response(200, json={
-                "responseCode": "100", "responseMessage": "General error",
-                "detailedResponseCode": "062",
-                "detailedResponseMessage": "Not allowed"}),
-        }))
-        with pytest.raises(GatewayError) as excinfo:
-            await adapter.process_direct_payment(client, request_for())
-        assert "token id" in str(excinfo.value)
-        await client.client.aclose()
-
     async def test_frictionless_response_skips_authenticate_payer(self):
         """The undocumented question this platform exists to answer, measured not assumed."""
         adapter = self.adapter()
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "sess_1"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
             "/authenticate/initiate": httpx.Response(200, json={
                 "responseCode": "000", "status": "Not Enrolled"}),
             "/direct/pay": httpx.Response(200, json={"responseCode": "000",
@@ -355,8 +387,8 @@ class TestGeidea:
         }))
         result = await adapter.process_direct_payment(client, request_for())
         assert result.status is TransactionStatus.SUCCESS
-        # session + tokenize + initiate + pay: Authenticate Payer was skipped.
-        assert len(client.timed_measurements) == 4
+        # session + initiate + pay: Authenticate Payer was skipped.
+        assert len(client.timed_measurements) == 3
         await client.client.aclose()
 
     async def test_force_full_3ds_keeps_the_documented_four(self):
@@ -366,8 +398,6 @@ class TestGeidea:
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "s"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
             "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
                                                                 "status": "Not Enrolled"}),
             "/authenticate/payer": httpx.Response(200, json={"responseCode": "000"}),
@@ -376,7 +406,7 @@ class TestGeidea:
                                                                "status": "Success"}}),
         }))
         await adapter.process_direct_payment(client, request_for())
-        assert len(client.timed_measurements) == 5
+        assert len(client.timed_measurements) == 4
         await client.client.aclose()
 
     async def test_a_200_carrying_a_decline_is_a_failure(self):
@@ -420,8 +450,6 @@ class TestGeideaTokenisation:
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "s1"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
             "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
                                                                 "status": "Not Enrolled"}),
             "/direct/pay": httpx.Response(200, json={
@@ -447,8 +475,6 @@ class TestGeideaTokenisation:
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "s1"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
             "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
                                                                 "status": "Not Enrolled"}),
             "/direct/pay": httpx.Response(200, json={"responseCode": "000",
@@ -466,8 +492,6 @@ class TestGeideaTokenisation:
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "s1"}}),
-            "/direct/tokenize": httpx.Response(200, json={"responseCode": "000",
-                                                          "tokenId": "tok_new"}),
             "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
                                                                 "status": "Not Enrolled"}),
             "/direct/pay": httpx.Response(200, json={"responseCode": "000",
@@ -477,10 +501,8 @@ class TestGeideaTokenisation:
         result = await adapter.process_direct_payment(
             client, request_for(payment_mode="store_card"))
         assert result.status is TransactionStatus.SUCCESS
-        # The token this payment was made with, not a reusable card-on-file token —
-        # and the message has to say which one it is.
-        assert result.stored_token == "tok_new"
-        assert "no stored-card token" in (result.gateway_message or "")
+        assert result.stored_token is None
+        assert "no card token was returned" in (result.gateway_message or "")
         await client.client.aclose()
 
     async def test_stored_token_payment_is_two_calls_and_sends_no_card(self):
@@ -533,21 +555,101 @@ class TestGeideaTokenisation:
         assert "Card token ID" in str(excinfo.value)
         await client.client.aclose()
 
-    async def test_the_initiator_is_configurable(self):
-        """A cardholder picking a saved card is not a merchant-initiated charge."""
+    async def test_the_initiator_is_chosen_per_payment_not_per_account(self):
+        """A cardholder picking a saved card is not a merchant-initiated charge.
+
+        Geidea spells the customer-initiated case ``Internet``; the UI says "Customer"
+        because that is what the distinction means to a person, and the adapter
+        translates rather than making everyone learn the wire value.
+        """
         adapter = self.adapter(token_id="t", agreement_id="a",
-                               card_on_file_initiator="Customer")
+                               card_on_file_initiator="Merchant")
         requests: List[httpx.Request] = []
+        routes = route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s"}}),
+            "/direct/pay/token": httpx.Response(200, json={"responseCode": "000",
+                                                           "order": {"orderId": "o",
+                                                                     "status": "Success"}}),
+        })
+
+        client = client_for(adapter, routes, requests)
+        await adapter.process_direct_payment(
+            client, request_for(payment_mode="token", card=None))
+        assert json.loads(requests[-1].content)["initiatedBy"] == "Merchant"
+        await client.client.aclose()
+
+        # The payment's own choice wins over the account default.
+        requests.clear()
+        client = client_for(adapter, routes, requests)
+        await adapter.process_direct_payment(client, request_for(
+            payment_mode="token", card=None, metadata={"initiated_by": "Customer"}))
+        body = json.loads(requests[-1].content)
+        assert body["initiatedBy"] == "Internet"
+        assert json.loads(requests[0].content)["initiatedBy"] == "Internet"
+        await client.client.aclose()
+
+    async def test_a_stored_token_charge_reports_what_it_charged(self):
+        """The token and agreement travel with the result, for the next charge."""
+        adapter = self.adapter(token_id="tok_9", agreement_id="agr_1")
         client = client_for(adapter, route({
             "/direct/session": httpx.Response(200, json={"responseCode": "000",
                                                          "session": {"id": "s"}}),
             "/direct/pay/token": httpx.Response(200, json={"responseCode": "000",
                                                            "order": {"orderId": "o",
                                                                      "status": "Success"}}),
-        }), requests)
-        await adapter.process_direct_payment(
+        }))
+        result = await adapter.process_direct_payment(
             client, request_for(payment_mode="token", card=None))
-        assert json.loads(requests[1].content)["initiatedBy"] == "Customer"
+        assert result.stored_token == "tok_9"
+        assert result.agreement_id == "agr_1"
+        await client.client.aclose()
+
+    async def test_a_store_card_payment_mints_the_agreement_itself(self):
+        """Geidea does not issue one — the merchant chooses it and quotes it later."""
+        adapter = self.adapter()
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s"}}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "000", "status": "Not Enrolled"}),
+            "/direct/pay": httpx.Response(200, json={
+                "responseCode": "000",
+                "order": {"orderId": "o", "status": "Success", "tokenId": "tok_9"}}),
+        }), requests)
+        result = await adapter.process_direct_payment(
+            client, request_for(payment_mode="store_card"))
+
+        session = json.loads(requests[0].content)
+        assert session["cardOnFile"] is True
+        # The payment that mints a token is customer-initiated by definition.
+        assert session["initiatedBy"] == "Internet"
+        assert session["cofAgreement"]["id"].startswith("burapay-agr-")
+        assert session["cofAgreement"]["type"] == "unscheduled"
+
+        # Both halves come back, because a later charge needs both.
+        assert result.stored_token == "tok_9"
+        assert result.agreement_id == session["cofAgreement"]["id"]
+        await client.client.aclose()
+
+    async def test_a_token_from_an_ordinary_payment_is_not_hidden(self):
+        """If a token came back, it is shown — whichever button was pressed."""
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s"}}),
+            "/authenticate/initiate": httpx.Response(200, json={
+                "responseCode": "000", "status": "Not Enrolled"}),
+            "/direct/pay": httpx.Response(200, json={
+                "responseCode": "000",
+                "order": {"orderId": "o", "status": "Success", "tokenId": "tok_5",
+                          "paymentMethod": {"maskedCardNumber": "411111******1111",
+                                            "brand": "Visa"}}}),
+        }))
+        result = await adapter.process_direct_payment(client, request_for())
+        assert result.stored_token == "tok_5"
+        assert result.stored_token_hint == "Visa card ending 1111"
         await client.client.aclose()
 
     async def test_gateways_without_the_capability_refuse_the_mode(self):
@@ -911,8 +1013,7 @@ class TestGeideaErrorReporting:
                 "detailedResponseMessage": "Merchant is not configured for raw card data"}),
         }))
         with pytest.raises(GatewayError) as excinfo:
-            await adapter.process_direct_payment(
-                client, request_for(card=None, token_id="tok_x"))
+            await adapter.process_direct_payment(client, request_for())
 
         text = str(excinfo.value)
         # Both levels, because "General error" alone identifies nothing.
@@ -934,8 +1035,7 @@ class TestGeideaErrorReporting:
                 "responseCode": "100", "responseMessage": "General error"}),
         }))
         with pytest.raises(GatewayError) as excinfo:
-            await adapter.process_direct_payment(
-                client, request_for(card=None, token_id="tok_x"))
+            await adapter.process_direct_payment(client, request_for())
         text = str(excinfo.value)
         assert "not enabled for Direct API card payments" in text
         assert "Hosted checkout and stored-token payments do not use this step" in text

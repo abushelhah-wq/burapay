@@ -139,6 +139,9 @@ export interface TransactionDetail {
   /** Present only on the transaction that minted it, for copying into Settings. */
   stored_token: string | null
   stored_token_hint: string | null
+  /** The agreement the token was stored under. A later charge needs both halves. */
+  agreement_id: string | null
+  agreement_type: string | null
   /** True while the payment is parked on a 3DS challenge the cardholder has not answered. */
   awaiting_customer_action: boolean
 }
