@@ -217,6 +217,8 @@ class ApiMeasurementOut(ORMModel):
     is_setup_call: bool = False
     response_size_bytes: Optional[int] = None
     response_snippet: Optional[str] = None
+    #: What was sent, on a call that failed. Sanitized; present only for failures.
+    request_snippet: Optional[str] = None
 
 
 class TransactionEventOut(ORMModel):

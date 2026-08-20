@@ -255,7 +255,8 @@ export default function TransactionDetail() {
                             should not require a shell on the server. Secrets and card
                             numbers are stripped before it is ever stored. */}
                         {(call.gateway_response_message || call.error_message
-                          || call.response_snippet) && !call.success && (
+                          || call.response_snippet
+                          || call.request_snippet) && !call.success && (
                           <tr>
                             <td colSpan={5} className="bg-ink-50 !py-2">
                               {call.gateway_response_message && (
@@ -264,16 +265,18 @@ export default function TransactionDetail() {
                                 </p>
                               )}
                               {call.response_snippet && (
-                                <details className="mt-1">
-                                  <summary className="cursor-pointer text-xs text-ink-500">
-                                    Raw gateway response
-                                  </summary>
-                                  <pre className="mt-2 max-h-56 overflow-auto rounded
-                                                  bg-ink-900 p-3 text-[11px] leading-relaxed
-                                                  text-ink-100">
-{call.response_snippet}
-                                  </pre>
-                                </details>
+                                <Snippet label="Raw gateway response"
+                                         text={call.response_snippet} />
+                              )}
+                              {/* A provider that answers "General error" and nothing
+                                  else leaves the request as the only evidence — a
+                                  field one level too deep, an enum value it does not
+                                  take. Card numbers and secrets are stripped before
+                                  this is stored. */}
+                              {call.request_snippet && (
+                                <Snippet label="What we sent" text={call.request_snippet}
+                                         hint="Sanitized: card numbers truncated, CVV and
+                                               secrets removed." />
                               )}
                             </td>
                           </tr>
@@ -441,5 +444,23 @@ function CopyRow({ label, value, hint }: {
         {hint && <span className="text-xs text-ink-500">{hint}</span>}
       </dd>
     </div>
+  )
+}
+
+/** A collapsed, scrollable blob of recorded text. */
+function Snippet({ label, text, hint }: {
+  label: string
+  text: string
+  hint?: string
+}) {
+  return (
+    <details className="mt-1">
+      <summary className="cursor-pointer text-xs text-ink-500">{label}</summary>
+      {hint && <p className="mt-1 text-[11px] text-ink-400">{hint}</p>}
+      <pre className="mt-2 max-h-56 overflow-auto rounded bg-ink-900 p-3
+                      text-[11px] leading-relaxed text-ink-100">
+{text}
+      </pre>
+    </details>
   )
 }

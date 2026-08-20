@@ -240,6 +240,9 @@ class ApiMeasurement(UUIDPrimaryKey, Base):
     #: Sanitized excerpt for debugging (section 43). Never a request body, never a
     #: header, never a secret.
     response_snippet: Mapped[Optional[str]] = mapped_column(Text)
+    #: The sanitized body that was sent, kept only for a call the gateway rejected.
+    #: PANs are truncated and CVVs dropped before it is written, like everywhere else.
+    request_snippet: Mapped[Optional[str]] = mapped_column(Text)
 
     transaction: Mapped[Transaction] = relationship(back_populates="measurements")
 

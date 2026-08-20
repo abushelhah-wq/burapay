@@ -127,6 +127,7 @@ async def _persist_measurements(session: AsyncSession, transaction: Transaction,
             request_size_bytes=record.request_size_bytes,
             response_size_bytes=record.response_size_bytes,
             response_snippet=record.response_snippet,
+            request_snippet=record.request_snippet,
         ))
 
 

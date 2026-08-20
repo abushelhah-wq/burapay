@@ -216,3 +216,47 @@ class TestClientSideValues:
         assert cleaned["session_data"] == "blob"
         assert cleaned["api_key"] == "[redacted]"
         assert cleaned["access_token"] == "[redacted]"
+
+
+class TestFailedRequestSnippet:
+    """The request body kept for a rejected call, and what must never be in it."""
+
+    async def _measure(self, status: int, body: dict):
+        import httpx
+        from app.gateways.http import InstrumentedClient
+        from app.models.enums import NormalizedOperation
+
+        client = InstrumentedClient(
+            gateway_code="test",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: httpx.Response(status, json={"ok": False}))),
+            known_secrets=["sk_super_secret_value"])
+        await client.call("POST /x", "POST", "https://gateway.test/x",
+                          normalized=NormalizedOperation.AUTHORIZATION, json=body)
+        await client.client.aclose()
+        return client.measurements[-1]
+
+    async def test_a_successful_call_keeps_no_request_body(self):
+        """Only failures need diagnosing, so only failures pay the storage cost."""
+        record = await self._measure(200, {"cardNumber": "4111111111111111"})
+        assert record.request_snippet is None
+
+    async def test_a_rejected_call_keeps_what_was_sent(self):
+        record = await self._measure(400, {"sessionId": "s1", "source": "DirectAPI"})
+        assert record.request_snippet is not None
+        assert '"source": "DirectAPI"' in record.request_snippet
+        assert "s1" in record.request_snippet
+
+    async def test_the_kept_request_never_contains_card_data(self):
+        """Section 25 holds here too — this is the one place a PAN could have leaked."""
+        record = await self._measure(400, {
+            "cardNumber": "4111111111111111",
+            "paymentMethod": {"cardNumber": "4111111111111111", "cvv": "123"},
+            "apiPassword": "sk_super_secret_value",
+        })
+        snippet = record.request_snippet or ""
+        assert "4111111111111111" not in snippet
+        assert "****1111" in snippet
+        # The CVV is dropped by name, not masked, so the key is gone entirely.
+        assert "cvv" not in snippet
+        assert "sk_super_secret_value" not in snippet

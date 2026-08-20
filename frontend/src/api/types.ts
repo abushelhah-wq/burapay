@@ -109,6 +109,8 @@ export interface ApiMeasurement {
   is_setup_call: boolean
   response_size_bytes: number | null
   response_snippet: string | null
+  /** What was sent, on a call the gateway rejected. Sanitized; absent on success. */
+  request_snippet: string | null
 }
 
 export interface TransactionEvent {

@@ -160,9 +160,9 @@ class GeideaAdapter(PaymentGatewayAdapter):
         CredentialField("timestamp_format", "Signature timestamp format", required=False,
                         default="%Y-%m-%dT%H:%M:%S",
                         help_text="strftime format for the signed timestamp. Change this first if signatures are rejected."),
-        CredentialField("source", "Channel", required=False, default="Web",
-                        choices=("Web", "InApp"),
-                        help_text="Sent as `source` on the Direct API calls. Web for a browser; InApp for a mobile SDK."),
+        CredentialField("source", "Channel", required=False, default="DirectAPI",
+                        choices=("DirectAPI", "HPP", "InApp"),
+                        help_text="Sent as `source` on the Direct API calls. Geidea's own samples use DirectAPI here; this is not a free-text field and an unrecognised value is rejected."),
         CredentialField("merchant_name", "Merchant name", required=False,
                         help_text="Shown to the cardholder during 3DS when your account does not already carry one."),
         CredentialField("force_full_3ds", "Always run Authenticate Payer", required=False,
@@ -303,6 +303,13 @@ class GeideaAdapter(PaymentGatewayAdapter):
         detailed code underneath it is often the only thing that identifies the cause.
         These point at what to change rather than at the code itself.
         """
+        if str(code) == "013":
+            return (
+                ". Geidea answers this when it could not parse or accept the request "
+                "body, and it does not say which field. Open the failed call on the "
+                "transaction page and expand it: the request that was sent is recorded "
+                "there. Check `source` first — it is an enum, not free text — then the "
+                "card expiry, which Geidea wants as two zero-padded strings")
         if str(code) == "069":
             return (
                 ". Geidea reports this when Initiate Authentication finds neither a "
@@ -400,16 +407,17 @@ class GeideaAdapter(PaymentGatewayAdapter):
     def _card_payload(card: Card) -> Dict[str, Any]:
         """The nested shape Authenticate Payer and Pay want.
 
-        The expiry is an object, and the year is two digits — Geidea's samples show
-        ``{"month": 12, "year": 30}``, so a four-digit year is trimmed rather than sent
-        as 2030 and rejected.
+        The expiry is an object holding two zero-padded *strings* — Geidea's samples
+        show ``{"month": "01", "year": "39"}``. A four-digit year is trimmed to two,
+        and single digits keep their leading zero, because "1" and "01" are not the
+        same string and only one of them is what the sample shows.
         """
-        year = str(card.year)[-2:]
         return {
             "cardholderName": card.holder,
             "cardNumber": card.number,
             "cvv": card.cvc,
-            "expiryDate": {"month": int(card.month), "year": int(year)},
+            "expiryDate": {"month": f"{int(card.month):02d}",
+                           "year": f"{int(str(card.year)[-2:]):02d}"},
         }
 
     # -- HPP -------------------------------------------------------------- #
@@ -573,21 +581,29 @@ class GeideaAdapter(PaymentGatewayAdapter):
         ``paymentMethod`` object: Geidea found neither a card number nor a token where
         it looks for them, and reported the token half of that check.
         """
+        # Every field Geidea's own samples carry is sent, including the ones that
+        # look optional. The four booleans are always present rather than omitted:
+        # a request that leaves them out is not a request Geidea has an example of,
+        # and this call answers a malformed body with 013 "Internal Server Error"
+        # rather than saying which field it disliked.
         payload: Dict[str, Any] = {
             "sessionId": session_id,
             "cardNumber": card.number,
+            "amount": round(request.amount, 2),
+            "currency": request.currency,
+            "merchantName": self.get("merchant_name") or "BuraPay Benchmark",
             "paymentOperation": "Pay",
             "source": self._source,
             "deviceIdentification": self._device(request),
+            "cardOnFile": store_card,
+            "isSetPaymentMethodEnabled": False,
+            "isCreateCustomerEnabled": False,
+            "restrictPaymentMethods": False,
         }
         if request.return_url:
             payload["ReturnUrl"] = request.return_url
         if request.webhook_url:
             payload["callbackUrl"] = request.webhook_url
-        if self.get("merchant_name"):
-            payload["merchantName"] = self.get("merchant_name")
-        if store_card:
-            payload["cardOnFile"] = True
 
         response = await client.call(
             "POST /pgw/api/v6/direct/authenticate/initiate", "POST",
@@ -733,7 +749,7 @@ class GeideaAdapter(PaymentGatewayAdapter):
 
     @property
     def _source(self) -> str:
-        return self.get("source") or "Web"
+        return self.get("source") or "DirectAPI"
 
     def _agreement_id(self, request: PaymentRequest, *, mint: bool = True) -> Optional[str]:
         """The agreement this card is being stored under.
@@ -768,8 +784,13 @@ class GeideaAdapter(PaymentGatewayAdapter):
         stays missing rather than being invented.
         """
         browser = request.browser or {}
+        # Geidea's samples show a 32-character hex id here, so a browser id that is not
+        # already in that shape is hashed into it rather than sent as-is. The hash is
+        # over a value the browser generated for itself — it is not derived from
+        # anything about the machine or the person.
+        supplied = str(browser.get("device_id") or request.reference)
         device: Dict[str, Any] = {
-            "providerDeviceId": browser.get("device_id") or request.reference,
+            "providerDeviceId": hashlib.md5(supplied.encode("utf-8")).hexdigest(),
         }
         if browser.get("user_agent"):
             device["userAgent"] = browser["user_agent"]

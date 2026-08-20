@@ -222,19 +222,32 @@ class TestGeidea:
         assert initiate["cardNumber"] == CARD.number
         assert "paymentMethod" not in initiate
         assert initiate["sessionId"] == "sess_1"
-        assert initiate["source"] == "Web"
+        assert initiate["source"] == "DirectAPI"
+        # The booleans Geidea's samples always carry are always sent, never omitted.
+        for key in ("cardOnFile", "isSetPaymentMethodEnabled",
+                    "isCreateCustomerEnabled", "restrictPaymentMethods"):
+            assert isinstance(initiate[key], bool), key
 
         # Payer and Pay: nested, with the expiry as an object and a two-digit year.
         for body in (payer, pay):
             assert body["paymentMethod"]["cardNumber"] == CARD.number
-            assert body["paymentMethod"]["expiryDate"] == {"month": 12, "year": 30}
+            # Zero-padded strings, as Geidea's own samples show — not integers.
+            assert body["paymentMethod"]["expiryDate"] == {"month": "12", "year": "30"}
             assert body["paymentMethod"]["cvv"] == CARD.cvc
             assert "expiryMonth" not in body["paymentMethod"]
+            assert body["source"] == "DirectAPI"
 
         # The 3DS id read off Initiate is what binds the authentication to the payment.
         assert payer["orderId"] == "ord_1"
         assert pay["threeDSecureId"] == "tds_1"
         await client.client.aclose()
+
+    def test_the_expiry_is_two_padded_strings(self):
+        """"1"/"9" and "01"/"09" are different strings, and only one is documented."""
+        from app.gateways.base import Card
+        payload = self.adapter()._card_payload(
+            Card(number="5123450000000008", month="1", year="2039", cvc="100"))
+        assert payload["expiryDate"] == {"month": "01", "year": "39"}
 
     async def test_browser_data_reaches_the_3ds_calls(self):
         """A server cannot know the cardholder's user agent, so the browser sends it."""

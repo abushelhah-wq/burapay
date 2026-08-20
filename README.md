@@ -387,8 +387,26 @@ with `detailedResponseCode=069` **Missing Token Id**. The error names the token 
 a check that failed for want of a card, which is why it reads as though a token were
 missing when the real problem is a misplaced card number.
 
-`expiryDate` is an object with a **two-digit** year — `{"month": 12, "year": 30}` — not
-`expiryMonth` / `expiryYear`.
+Three more details that are easy to get wrong and produce nothing but a generic error:
+
+* `expiryDate` is an object holding two zero-padded **strings** —
+  `{"month": "01", "year": "39"}` — not `expiryMonth` / `expiryYear`, and not integers.
+* `source` is an enum, not free text. Geidea's own samples use `DirectAPI`.
+* Initiate Authentication's samples always carry `merchantName`, `cardOnFile`,
+  `isSetPaymentMethodEnabled`, `isCreateCustomerEnabled` and `restrictPaymentMethods`.
+  Omitting them gets `detailedResponseCode=013` "Internal Server Error", which does not
+  say which field it disliked — so the adapter always sends all of them.
+
+### When a gateway will not say what is wrong
+
+Geidea answers a malformed request with `responseCode=100` "General error" and a
+detailed code that is often no more specific. There is no way to reason about that from
+the outside, so the platform records **what it sent**: expand a failed call on the
+transaction page and there are two blocks, *Raw gateway response* and *What we sent*.
+
+The request is stored only for calls that failed, and only after the same sanitizer that
+guards everything else — card numbers truncated to a last four, CVV dropped by name,
+secrets redacted. A test asserts a PAN cannot reach it.
 
 **Run Benchmark → Direct API** has a *Payment details* step:
 

@@ -34,6 +34,7 @@ round trip to run a refund test looks slower at refunding than it is.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -43,7 +44,7 @@ import httpx
 
 from app.core.errors import ErrorCategory, category_for_http
 from app.core.logging import get_logger
-from app.core.sanitizer import sanitize_snippet, scrub_text
+from app.core.sanitizer import sanitize, sanitize_snippet, scrub_text
 from app.models.enums import NormalizedOperation
 
 logger = get_logger(__name__)
@@ -73,6 +74,12 @@ class CallMeasurement:
     request_size_bytes: Optional[int] = None
     response_size_bytes: Optional[int] = None
     response_snippet: Optional[str] = None
+    #: The body that was *sent*, sanitized the same way the response is. Kept only for
+    #: calls the gateway rejected: when a provider answers "General error" the request
+    #: is the only place the cause can be, and reading it off the transaction page beats
+    #: guessing at it from the outside. Card numbers are truncated to a last-four and
+    #: CVVs are dropped before this is stored, exactly as everywhere else.
+    request_snippet: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -181,12 +188,34 @@ class InstrumentedClient:
             record.error_category = category_for_http(response.status_code)
             record.error_message = f"HTTP {response.status_code}"
         # The snippet is sanitized twice over: PAN/secret scrubbing, then truncation.
-        # Request bodies are never stored, so a card sent to a gateway never lands here.
         record.response_snippet = self._clean(sanitize_snippet(response.text, 1500))
+        if not record.success:
+            # Only for a failed call, and only after the sanitizer has been over it.
+            # A gateway that reports nothing but "General error" leaves the request as
+            # the only evidence, and a field in the wrong place is invisible without it.
+            record.request_snippet = self._clean(
+                sanitize_snippet(self._readable(request_body), 1500))
 
         self.measurements.append(record)
         self._log(record)
         return response
+
+    @staticmethod
+    def _readable(body: bytes) -> str:
+        """Decode a request body for the snippet, and re-serialize JSON so it is legible.
+
+        Sanitizing the parsed structure rather than the raw text matters: it lets the
+        by-key rules fire, so a ``cvv`` field is dropped by name and a ``cardNumber``
+        becomes a last-four, instead of relying on the free-text PAN sweep alone.
+        """
+        try:
+            text = body.decode("utf-8", errors="replace")
+        except Exception:                                  # noqa: BLE001 - never fatal
+            return ""
+        try:
+            return json.dumps(sanitize(json.loads(text)), ensure_ascii=False)
+        except ValueError:
+            return text
 
     def annotate_last(self, *, code: Optional[str] = None, message: Optional[str] = None,
                       success: Optional[bool] = None,
