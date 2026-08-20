@@ -42,12 +42,15 @@ export interface Gateway {
   supports_hpp: boolean
   supports_direct: boolean
   supported_currencies: string[]
+  supported_payment_modes: string[]
   logo_slug: string | null
   display_order: number
   docs_url: string | null
   notes: string[]
   configured: boolean
   missing_fields: string[]
+  /** Stored credential key names only — never values. */
+  configured_fields: string[]
   status: string
   credential_fields: CredentialField[]
   documented_calls: Record<string, string>
@@ -61,6 +64,7 @@ export interface Transaction {
   gateway_transaction_id: string | null
   merchant_reference: string
   integration_type: 'hpp' | 'direct'
+  payment_mode: string
   environment: string
   amount: number
   currency: string
@@ -132,12 +136,16 @@ export interface TransactionDetail {
   gateway_api_time_ms: number
   setup_call_time_ms: number
   documented_calls: string | null
+  /** Present only on the transaction that minted it, for copying into Settings. */
+  stored_token: string | null
+  stored_token_hint: string | null
 }
 
 export interface ComparisonRow {
   gateway_code: string
   gateway_name: string
   integration_type: string
+  payment_mode: string
   is_simulated: boolean
   documented_calls: string | null
   transactions: number
@@ -176,6 +184,7 @@ export interface BenchmarkRun {
   gateway_id: string | null
   comparison_test_id: string | null
   integration_type: string
+  payment_mode: string
   environment: string
   currency: string
   amount: number

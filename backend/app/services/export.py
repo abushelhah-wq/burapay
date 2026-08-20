@@ -24,7 +24,7 @@ HEADER_FONT = Font(color="FFFFFF", bold=True)
 
 TRANSACTION_COLUMNS: Sequence[str] = (
     "id", "started_at", "completed_at", "gateway_code", "integration_type",
-    "environment", "status", "amount", "currency", "merchant_reference",
+    "payment_mode", "environment", "status", "amount", "currency", "merchant_reference",
     "gateway_transaction_id", "api_call_count", "gateway_api_time_ms",
     "three_ds_time_ms", "customer_interaction_time_ms", "redirect_time_ms",
     "page_load_time_ms", "total_duration_ms", "app_overhead_ms", "webhook_latency_ms",
@@ -111,6 +111,7 @@ def flatten_summary(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "gateway_code": row.get("gateway_code"),
             "gateway_name": row.get("gateway_name"),
             "integration_type": row.get("integration_type"),
+            "payment_mode": row.get("payment_mode"),
             "transactions": row.get("transactions"),
             "completed": row.get("completed"),
             "success_rate_pct": row.get("success_rate"),

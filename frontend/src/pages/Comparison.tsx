@@ -13,7 +13,7 @@ import type { ComparisonRow, Gateway, HppRow, Ranking } from '../api/types'
 import { MetricBarChart, TimeSeriesChart } from '../components/Charts'
 import type { SeriesPoint } from '../components/Charts'
 import { Badge, Card, EmptyState, ErrorNotice, Note, SampleSize, Spinner } from '../components/ui'
-import { count, integrationLabel, ms, percent } from '../lib/format'
+import { count, integrationLabel, ms, paymentModeLabel, percent } from '../lib/format'
 
 type Tab = 'api' | 'hpp' | 'integrations'
 
@@ -204,12 +204,19 @@ export default function Comparison() {
                     </thead>
                     <tbody>
                       {rows.map((row) => (
-                        <tr key={`${row.gateway_code}-${row.integration_type}`}>
+                        <tr key={`${row.gateway_code}-${row.integration_type}-${row.payment_mode}`}>
                           <td className="font-medium">
                             {row.gateway_name}{' '}
                             {row.is_simulated && <Badge tone="warn">simulator</Badge>}
                           </td>
-                          <td>{integrationLabel(row.integration_type)}</td>
+                          <td>
+                            {integrationLabel(row.integration_type)}
+                            {row.payment_mode && row.payment_mode !== 'standard' && (
+                              <span className="block text-[11px] text-ink-500">
+                                {paymentModeLabel(row.payment_mode)}
+                              </span>
+                            )}
+                          </td>
                           <td className="num">{count(row.transactions)}</td>
                           <td className="num">{ms(row.api.mean)}</td>
                           <td className="num">{ms(row.api.p50)}</td>

@@ -54,7 +54,7 @@ from typing import Any, Dict, Mapping, Optional
 
 import httpx
 
-from app.core.errors import ErrorCategory, GatewayError
+from app.core.errors import ErrorCategory, GatewayError, NotConfigured
 from app.gateways.base import (Card, CredentialField, HealthProbe, HppSession,
                                PaymentGatewayAdapter, PaymentRequest, PaymentResult)
 from app.gateways.http import InstrumentedClient
@@ -97,6 +97,9 @@ class GeideaAdapter(PaymentGatewayAdapter):
     display_name = "Geidea"
     supports_hpp = True
     supports_direct = True
+    # Geidea stores cards against an agreement and charges them through
+    # /pay/token, so all three modes are real here.
+    supported_payment_modes = ("standard", "store_card", "token")
     supported_currencies = ("SAR", "AED", "EGP", "USD")
     docs_url = "https://docs.geidea.net/"
 
@@ -125,6 +128,24 @@ class GeideaAdapter(PaymentGatewayAdapter):
         CredentialField("webhook_secret", "Callback signature secret", required=False,
                         secret=True,
                         help_text="Used to verify callback signatures when your account signs them."),
+
+        # -- tokenisation / card on file ---------------------------------- #
+        # Needed only for the stored-token payment mode. Left blank, Geidea still works
+        # for ordinary card payments; the Run Benchmark page says what is missing if a
+        # stored-token payment is attempted without them.
+        CredentialField("agreement_id", "Agreement ID", required=False,
+                        placeholder="agr_…",
+                        help_text="The agreement a stored card was saved under. Required for stored-token payments; Geidea returns it when the card is first stored."),
+        CredentialField("agreement_type", "Agreement type", required=False,
+                        default="unscheduled",
+                        choices=("unscheduled", "recurring", "installment"),
+                        help_text="How the stored card may be charged. Must match the agreement that was created with the card."),
+        CredentialField("token_id", "Card token ID", required=False,
+                        placeholder="tok_…",
+                        help_text="The stored card to charge. Run a Store card (tokenize) payment first — the token it returns is shown on the transaction page, ready to paste here."),
+        CredentialField("card_on_file_initiator", "Initiated by", required=False,
+                        default="Merchant", choices=("Merchant", "Customer"),
+                        help_text="Merchant for an unattended recurring charge; Customer when the cardholder is present and picking a saved card."),
     )
 
     notes = (
@@ -136,11 +157,16 @@ class GeideaAdapter(PaymentGatewayAdapter):
         "are configurable on this page.",
         "Geidea reports the outcome in responseCode, not only in the HTTP status. A 200 "
         "with responseCode != 000 is a failure and is recorded as one.",
+        "Tokenisation is a two-step affair: a Store card payment mints the token, and a "
+        "later Stored token payment charges it. The token belongs to a cardholder, so "
+        "it is shown once on the transaction that created it and is never stored as a "
+        "credential automatically — paste it into Settings deliberately.",
     )
 
     documented_calls = {
         "hpp": "2 (create session + confirm order)",
         "direct": "4 fixed (session -> initiate -> authenticate payer -> pay)",
+        "direct/token": "2 (fresh session + pay/token) — a session is required per charge",
     }
 
     # -- configuration ---------------------------------------------------- #
@@ -309,11 +335,18 @@ class GeideaAdapter(PaymentGatewayAdapter):
 
     async def process_direct_payment(self, client: InstrumentedClient,
                                      request: PaymentRequest) -> PaymentResult:
+        if request.payment_mode == "token":
+            return await self._pay_with_stored_token(client, request)
+
         if request.card is None:
             raise GatewayError("Geidea Direct API needs card details to authenticate.")
         card = request.card
 
-        session_body = await self._create_session(client, request)
+        # Storing the card is a property of the session, so the mode has to be decided
+        # before the first call rather than bolted on at authorisation time.
+        store_card = request.payment_mode == "store_card"
+        session_body = await self._create_session(
+            client, request, **({"cardOnFile": True} if store_card else {}))
         session_id = self._session_id(session_body)
 
         initiate_response = await client.call(
@@ -346,7 +379,82 @@ class GeideaAdapter(PaymentGatewayAdapter):
 
         result = self._outcome(paid, self._order_id(paid) or session_id)
         result.three_ds_required = challenge
+        if store_card:
+            token, hint = self._stored_token(paid)
+            result.stored_token = token
+            result.stored_token_hint = hint
+            if token is None:
+                # Worth saying plainly: the payment succeeded, the tokenisation did
+                # not, and a later stored-token charge has nothing to charge.
+                result.gateway_message = (
+                    (result.gateway_message or "")
+                    + " — no card token was returned. The account may not have card "
+                      "storage enabled for this agreement.").strip()
         return result
+
+    async def _pay_with_stored_token(self, client: InstrumentedClient,
+                                     request: PaymentRequest) -> PaymentResult:
+        """Charge a card Geidea already holds — the merchant-initiated flow.
+
+        Two calls, and both recur on every charge: Geidea requires a fresh session
+        object per payment even when the card is already stored, which is the only
+        gateway in this set that does. No card details are sent, so there is no
+        authentication step and nothing to enter.
+        """
+        token_id = self.get("token_id")
+        agreement_id = self.get("agreement_id")
+        missing = [label for label, value in
+                   (("Card token ID", token_id), ("Agreement ID", agreement_id))
+                   if not value]
+        if missing:
+            raise NotConfigured(
+                f"A stored-token payment needs {' and '.join(missing)} on Geidea's "
+                "settings. Run a Store card (tokenize) payment first — it returns the "
+                "token and the agreement, and the transaction page shows both.")
+
+        session_body = await self._create_session(client, request, cardOnFile=True)
+        session_id = self._session_id(session_body)
+
+        payload: Dict[str, Any] = {
+            "sessionId": session_id,
+            "tokenId": token_id,
+            "agreementId": agreement_id,
+            "agreementType": self.get("agreement_type") or "unscheduled",
+            "initiatedBy": self.get("card_on_file_initiator") or "Merchant",
+            "paymentOperation": "Pay",
+        }
+        response = await client.call(
+            "POST /pgw/api/v2/direct/pay/token", "POST",
+            self._url("/pgw/api/v2/direct/pay/token"),
+            normalized=NormalizedOperation.AUTHORIZATION, json=payload)
+        body = self._check(client, await self.expect_ok(client, response, "pay by token"),
+                           "pay by token")
+        return self._outcome(body, self._order_id(body) or session_id)
+
+    @staticmethod
+    def _stored_token(body: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
+        """Pull a minted card token out of a payment response.
+
+        Geidea has returned this under more than one shape, so several are accepted.
+        Only the token id and a masked hint are taken — never a PAN, and the sanitizer
+        would truncate one anyway.
+        """
+        order = body.get("order") or {}
+        containers = (order.get("tokenId"), body.get("tokenId"),
+                      (order.get("paymentMethod") or {}).get("tokenId"),
+                      (body.get("paymentMethod") or {}).get("tokenId"))
+        token = next((value for value in containers if value), None)
+        payment_method = order.get("paymentMethod") or body.get("paymentMethod") or {}
+        masked = payment_method.get("maskedCardNumber") or payment_method.get("cardNumber")
+        hint = None
+        if masked:
+            digits = "".join(ch for ch in str(masked) if ch.isdigit())
+            if len(digits) >= 4:
+                hint = f"card ending {digits[-4:]}"
+        brand = payment_method.get("brand") or payment_method.get("cardBrand")
+        if brand:
+            hint = f"{brand} {hint}" if hint else str(brand)
+        return token, hint
 
     @property
     def _force_full_3ds(self) -> bool:

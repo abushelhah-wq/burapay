@@ -184,10 +184,12 @@ async def run_direct_transaction(
         session: AsyncSession, *, gateway_code: str, amount: float, currency: str,
         description: str = "BuraPay benchmark transaction",
         reference: Optional[str] = None, environment: str = "sandbox",
-        benchmark_run_id: Optional[str] = None, methodology: str = "mixed") -> Transaction:
+        benchmark_run_id: Optional[str] = None, methodology: str = "mixed",
+        payment_mode: str = "standard") -> Transaction:
     """Run one Direct API transaction, start to final state, in this process."""
     gateway, adapter = await _prepare(session, gateway_code, environment)
     adapter.require_supports(IntegrationType.DIRECT)
+    adapter.require_supports_mode(payment_mode)
     if not adapter.supports_currency(currency):
         raise BenchmarkRefused(
             f"{gateway.name} is not configured for {currency}. Supported: "
@@ -199,14 +201,16 @@ async def run_direct_transaction(
         description=description,
         return_url=f"{settings.public_base_url}/api/v1/transactions/return/{gateway_code}",
         webhook_url=f"{settings.public_base_url}/api/webhooks/{gateway_code}",
-        card=await _test_card(session))
+        payment_mode=payment_mode,
+        # A stored-token charge sends no card details at all — that is the point of it.
+        card=None if payment_mode == "token" else await _test_card(session))
 
     transaction = Transaction(
         benchmark_run_id=benchmark_run_id, gateway_id=gateway.id, gateway_code=gateway.code,
         merchant_reference=reference, integration_type=IntegrationType.DIRECT.value,
-        environment=environment, amount=amount, currency=currency.upper(),
-        description=description, status=TransactionStatus.IN_PROGRESS.value,
-        methodology=methodology)
+        payment_mode=payment_mode, environment=environment, amount=amount,
+        currency=currency.upper(), description=description,
+        status=TransactionStatus.IN_PROGRESS.value, methodology=methodology)
     session.add(transaction)
     await session.flush()          # id is needed before the flow starts
 
@@ -235,6 +239,14 @@ async def run_direct_transaction(
                               timestamp=last.completed_at or last.started_at)
         timer.mark(TimelineEvent.AUTHORIZATION_RESPONSE)
         _apply_result(transaction, result)
+        if result.stored_token:
+            # Shown on the transaction page for the operator to copy into Settings.
+            # Deliberately not written into the gateway's credentials by the platform:
+            # a card token belongs to a cardholder, and storing one automatically is
+            # not a decision this application should make on someone's behalf.
+            transaction.context = {**(transaction.context or {}),
+                                   "stored_token": result.stored_token,
+                                   "stored_token_hint": result.stored_token_hint}
         timer.mark(TimelineEvent.FINAL_STATUS_CONFIRMED, status=result.status.value)
     except Exception as exc:                              # noqa: BLE001 - every failure is data
         timer.mark(TimelineEvent.ERROR, label=type(exc).__name__)

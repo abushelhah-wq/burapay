@@ -6,7 +6,8 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { api, downloadExport } from '../api/client'
 import type { Gateway, Page, Transaction } from '../api/types'
 import { Card, EmptyState, ErrorNotice, Spinner, StatusBadge } from '../components/ui'
-import { dateTime, integrationLabel, money, ms } from '../lib/format'
+import { PAYMENT_MODE_LABELS, dateTime, integrationLabel, money, ms,
+         paymentModeLabel } from '../lib/format'
 
 const STATUSES = ['SUCCESS', 'DECLINED', 'FAILED', 'ERROR', 'TIMEOUT', 'CANCELLED',
                   'PENDING', 'IN_PROGRESS']
@@ -23,6 +24,7 @@ export default function Transactions() {
     gateway_code: params.get('gateway_code') ?? '',
     integration_type: params.get('integration_type') ?? '',
     status: params.get('status') ?? '',
+    payment_mode: params.get('payment_mode') ?? '',
     currency: params.get('currency') ?? '',
     benchmark_run_id: params.get('benchmark_run_id') ?? '',
     merchant_reference: params.get('merchant_reference') ?? '',
@@ -39,6 +41,7 @@ export default function Transactions() {
       ...(filters.gateway_code ? { gateway_code: [filters.gateway_code] } : {}),
       integration_type: filters.integration_type || undefined,
       status: filters.status || undefined,
+      payment_mode: filters.payment_mode || undefined,
       currency: filters.currency || undefined,
       benchmark_run_id: filters.benchmark_run_id || undefined,
       merchant_reference: filters.merchant_reference || undefined,
@@ -114,6 +117,16 @@ export default function Transactions() {
             </select>
           </div>
           <div>
+            <label className="label" htmlFor="f-mode">Payment mode</label>
+            <select id="f-mode" className="input" value={filters.payment_mode}
+                    onChange={(e) => update('payment_mode', e.target.value)}>
+              <option value="">All</option>
+              {Object.entries(PAYMENT_MODE_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
             <label className="label" htmlFor="f-currency">Currency</label>
             <input id="f-currency" className="input" value={filters.currency}
                    placeholder="SAR" onChange={(e) => update('currency', e.target.value)} />
@@ -168,7 +181,14 @@ export default function Transactions() {
                           {row.gateway_code}
                         </Link>
                       </td>
-                      <td>{integrationLabel(row.integration_type)}</td>
+                      <td>
+                        {integrationLabel(row.integration_type)}
+                        {row.payment_mode && row.payment_mode !== 'standard' && (
+                          <span className="block text-[11px] text-ink-500">
+                            {paymentModeLabel(row.payment_mode)}
+                          </span>
+                        )}
+                      </td>
                       <td className="num">{money(row.amount, row.currency)}</td>
                       <td><StatusBadge status={row.status} /></td>
                       <td className="num">{row.api_call_count}</td>

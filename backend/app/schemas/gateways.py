@@ -39,9 +39,16 @@ class GatewayDetail(GatewayOut):
     #: Which required credential fields are still missing, so the UI can say exactly
     #: what to fill in rather than just "Not Configured".
     missing_fields: List[str] = Field(default_factory=list)
+    #: Which credential keys are stored. Key names only — no values, masked or
+    #: otherwise. Lets the UI say whether an optional capability such as tokenisation
+    #: is ready without exposing anything.
+    configured_fields: List[str] = Field(default_factory=list)
     status: str = "Not Configured"
     credential_fields: List[CredentialFieldOut] = Field(default_factory=list)
     documented_calls: Dict[str, str] = Field(default_factory=dict)
+    #: Direct API payment modes this gateway implements. A gateway offering more than
+    #: one gets a mode selector on the Run Benchmark page.
+    supported_payment_modes: List[str] = Field(default_factory=lambda: ["standard"])
     is_simulated: bool = False
 
 

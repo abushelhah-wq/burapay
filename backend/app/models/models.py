@@ -87,6 +87,8 @@ class BenchmarkRun(UUIDPrimaryKey, Timestamped, Base):
     comparison_test_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("comparison_tests.id", ondelete="CASCADE"), index=True)
     integration_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    payment_mode: Mapped[str] = mapped_column(String(20), nullable=False,
+                                              default="standard")
     environment: Mapped[str] = mapped_column(String(20), nullable=False, default="sandbox")
     currency: Mapped[str] = mapped_column(String(10), nullable=False)
     amount: Mapped[float] = mapped_column(Float, nullable=False)
@@ -141,6 +143,10 @@ class Transaction(UUIDPrimaryKey, Base):
     gateway_transaction_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)
     merchant_reference: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     integration_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    #: standard | store_card | token. A stored-credential payment is a different flow
+    #: with a different call count, so it is grouped separately in every comparison.
+    payment_mode: Mapped[str] = mapped_column(String(20), nullable=False,
+                                              default="standard")
     environment: Mapped[str] = mapped_column(String(20), nullable=False, default="sandbox")
     amount: Mapped[float] = mapped_column(Float, nullable=False)
     currency: Mapped[str] = mapped_column(String(10), nullable=False)

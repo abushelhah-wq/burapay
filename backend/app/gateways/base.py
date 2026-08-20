@@ -75,6 +75,9 @@ class PaymentRequest:
     return_url: str = ""
     webhook_url: str = ""
     card: Optional[Card] = None
+    #: standard | store_card | token. Adapters that declare only "standard" can
+    #: ignore it.
+    payment_mode: str = "standard"
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -105,6 +108,12 @@ class PaymentResult:
     three_ds_required: bool = False
     context: Dict[str, Any] = field(default_factory=dict)
     raw: Dict[str, Any] = field(default_factory=dict)
+    #: A card token the gateway minted during this payment. Surfaced so it can be
+    #: copied into the gateway's settings and used for a later merchant-initiated
+    #: charge — never stored as a credential automatically, since it belongs to a
+    #: cardholder rather than to the merchant account.
+    stored_token: Optional[str] = None
+    stored_token_hint: Optional[str] = None
 
     @property
     def succeeded(self) -> bool:
@@ -129,6 +138,9 @@ class PaymentGatewayAdapter:
     display_name: str = "Adapter"
     supports_hpp: bool = False
     supports_direct: bool = False
+    #: Which Direct API payment modes this gateway implements. Everything supports a
+    #: plain card payment; storing a card and charging a stored token are extra.
+    supported_payment_modes: Sequence[str] = ("standard",)
     #: Currencies this gateway is known to accept. Empty means "not declared" — the
     #: UI says so rather than implying universal support (section 3).
     supported_currencies: Sequence[str] = ()
@@ -181,6 +193,12 @@ class PaymentGatewayAdapter:
             raise NotSupported(
                 f"{self.display_name} does not support "
                 f"{'HPP / Hosted Checkout' if integration is IntegrationType.HPP else 'Direct API'}.")
+
+    def require_supports_mode(self, payment_mode: str) -> None:
+        if payment_mode not in self.supported_payment_modes:
+            raise NotSupported(
+                f"{self.display_name} does not support the "
+                f"{payment_mode.replace('_', ' ')} payment mode.")
 
     def supports_currency(self, currency: str) -> bool:
         if not self.supported_currencies:

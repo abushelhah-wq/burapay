@@ -161,8 +161,25 @@ TLS is Traefik's. This project installs no certbot, stores no certificate, and c
 no existing router, network or resolver. Details in
 [Traefik integration](#traefik-integration).
 
-Sign in at `https://busrapay.com` with `BOOTSTRAP_ADMIN_EMAIL` and
-`BOOTSTRAP_ADMIN_PASSWORD`, then change the password immediately.
+### Signing in and configuring a gateway
+
+Sign in at `https://busrapay.com` with the `BOOTSTRAP_ADMIN_EMAIL` and
+`BOOTSTRAP_ADMIN_PASSWORD` from `.env`. That account is created on first boot, only
+when the platform has no users at all — changing those variables later does nothing,
+because by then the account exists. Change the password from **Settings** immediately.
+
+Gateway credentials are then entered **in the browser**, not in a file:
+
+1. **Settings → Gateway credentials → Geidea** (or any other gateway). The form is
+   generated from what the adapter declares, with help text on every field.
+2. Paste the sandbox values and save. They are encrypted with `ENCRYPTION_KEY` before
+   they touch the database, and no endpoint ever returns one in full again — reads come
+   back masked, and re-saving without retyping a secret leaves the stored value alone.
+3. **Gateways → Run health check** confirms they authenticate, using a read-only
+   endpoint. No payment is created.
+4. **Run Benchmark** → the gateway is now selectable and the button is live.
+
+Rotating a key is the same three clicks. There is no `.env` edit and no redeploy.
 
 ### First run without any gateway credentials
 
@@ -312,6 +329,41 @@ adapter says so in its notes and makes the detail configurable rather than guess
 silently. Three such cases are live today: Geidea's signature field order and
 timestamp format, HyperPay's back-office URL shape for refunds, and Moyasar's
 contradictory guidance on raw-card versus tokenize-first Direct payments.
+
+### Geidea: stored cards and agreements
+
+Geidea can store a card against an agreement and charge it later without card details.
+That is a different flow with a different call count, so it is a **payment mode** on
+the Run Benchmark page rather than something hidden inside the ordinary Direct flow —
+and every comparison groups by it, because averaging a two-call token charge together
+with a four-call card payment would describe neither.
+
+| Mode | What it does | Calls |
+| ---- | ------------ | ----- |
+| Standard card payment | A one-off payment with card details | 4 (3 when frictionless) |
+| Store card (tokenize) | Pays *and* asks Geidea to keep the card, returning a token | 4, plus the token |
+| Stored token (merchant-initiated) | Charges the stored card. No card details, so nothing to authenticate | 2 — Geidea still needs a fresh session per charge |
+
+The round trip:
+
+1. **Settings → Geidea** — fill in **Agreement ID** and **Agreement type** if Geidea has
+   already given you an agreement. **Initiated by** is `Merchant` for an unattended
+   recurring charge, `Customer` when the cardholder is present and picking a saved card.
+2. **Run Benchmark → Geidea → Direct API → Store card (tokenize)** and run one payment.
+3. The transaction page shows the **card token** it minted, with a copy button.
+4. Paste that token into **Settings → Geidea → Card token ID**.
+5. **Stored token (merchant-initiated)** is now selectable and will charge that card.
+
+Until both the token and the agreement are stored, the stored-token mode says exactly
+what is missing and links to the page that fixes it, rather than failing at the gateway.
+
+The platform never writes a minted token into the gateway's credentials by itself. A
+card token belongs to a cardholder rather than to the merchant account, and storing one
+is a decision to take deliberately — so it is shown once, on the transaction that
+created it, and copied across on purpose.
+
+All four tokenisation fields are optional. Geidea works for ordinary card payments with
+none of them set.
 
 ---
 

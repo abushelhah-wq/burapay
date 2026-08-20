@@ -46,10 +46,11 @@ async def start_transaction(payload: StartTransactionRequest,
                 session, gateway_code=payload.gateway_code, amount=payload.amount,
                 currency=payload.currency, description=payload.description,
                 reference=payload.reference, environment=payload.environment,
-                methodology=payload.methodology)
+                methodology=payload.methodology, payment_mode=payload.payment_mode)
             return StartTransactionResponse(
                 transaction_id=transaction.id, status=transaction.status,
-                gateway_reference=transaction.gateway_transaction_id)
+                gateway_reference=transaction.gateway_transaction_id,
+                stored_token=(transaction.context or {}).get("stored_token"))
 
         transaction, hpp = await start_hpp_transaction(
             session, gateway_code=payload.gateway_code, amount=payload.amount,
@@ -164,6 +165,7 @@ async def list_transactions(
         gateway_code: Optional[List[str]] = Query(None),
         integration_type: Optional[str] = Query(None, pattern="^(hpp|direct)$"),
         status_filter: Optional[str] = Query(None, alias="status"),
+        payment_mode: Optional[str] = Query(None, pattern="^(standard|store_card|token)$"),
         currency: Optional[str] = Query(None),
         environment: Optional[str] = Query(None),
         benchmark_run_id: Optional[str] = Query(None),
@@ -178,6 +180,7 @@ async def list_transactions(
     """The searchable transaction list from section 44."""
     filters = analytics.TransactionFilters(
         gateway_codes=gateway_code, integration_type=integration_type, status=status_filter,
+        payment_mode=payment_mode,
         currency=currency, environment=environment, benchmark_run_id=benchmark_run_id,
         merchant_reference=merchant_reference, gateway_transaction_id=gateway_transaction_id,
         methodology=methodology, date_from=date_from, date_to=date_to)

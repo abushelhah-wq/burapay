@@ -11,13 +11,13 @@
  */
 
 import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 
 import { api, ApiError } from '../api/client'
 import type { AppSettings, Gateway } from '../api/types'
 import { Badge, Card, ErrorNotice, Note, Spinner } from '../components/ui'
 import { markRedirect } from '../lib/browserMetrics'
-import { integrationLabel } from '../lib/format'
+import { PAYMENT_MODE_HINTS, PAYMENT_MODE_LABELS, integrationLabel } from '../lib/format'
 
 type Mode = 'single' | 'run' | 'comparison'
 
@@ -35,6 +35,7 @@ export default function RunBenchmark() {
   const [gatewayCode, setGatewayCode] = useState('')
   const [comparisonCodes, setComparisonCodes] = useState<string[]>([])
   const [integration, setIntegration] = useState<'direct' | 'hpp'>('direct')
+  const [paymentMode, setPaymentMode] = useState('standard')
   const [amount, setAmount] = useState('1.00')
   const [currency, setCurrency] = useState('SAR')
   const [reference, setReference] = useState('')
@@ -65,12 +66,21 @@ export default function RunBenchmark() {
     () => gateways?.find((item) => item.code === gatewayCode) ?? null,
     [gateways, gatewayCode])
 
+  // A stored-token payment needs both a token and the agreement it was stored under.
+  // Neither is a required credential — the gateway works fine without them — so this
+  // is read from which keys are stored rather than from the missing-field list.
+  const tokenReady = Boolean(
+    selected?.configured_fields?.includes('token_id')
+    && selected?.configured_fields?.includes('agreement_id'))
+
   useEffect(() => {
-    // Keep the integration choice valid when the gateway changes.
+    // Keep the integration and mode valid when the gateway changes.
     if (!selected) return
     if (integration === 'hpp' && !selected.supports_hpp) setIntegration('direct')
     if (integration === 'direct' && !selected.supports_direct) setIntegration('hpp')
-  }, [selected, integration])
+    const modes = selected.supported_payment_modes ?? ['standard']
+    if (!modes.includes(paymentMode)) setPaymentMode('standard')
+  }, [selected, integration, paymentMode])
 
   if (error) return <ErrorNotice error={error} />
   if (!gateways || !settings || !limits) return <Spinner label="Loading gateways" />
@@ -85,6 +95,7 @@ export default function RunBenchmark() {
       gateway_code: gatewayCode, integration_type: integration,
       amount: Number(amount), currency, description,
       reference: reference || undefined, methodology,
+      payment_mode: integration === 'direct' ? paymentMode : 'standard',
     })
     if (result.mode === 'widget') {
       // The gateway returned an identifier for its own browser component rather than
@@ -117,6 +128,7 @@ export default function RunBenchmark() {
       gateway_code: gatewayCode, integration_type: integration,
       transaction_count: transactionCount, amount: Number(amount), currency,
       interval_seconds: interval, methodology,
+      payment_mode: integration === 'direct' ? paymentMode : 'standard',
     })
     navigate(`/runs/${run.id}`)
   }
@@ -127,6 +139,7 @@ export default function RunBenchmark() {
       gateway_codes: comparisonCodes, integration_type: integration,
       transactions_per_gateway: transactionCount, amount: Number(amount), currency,
       interval_seconds: interval, methodology,
+      payment_mode: integration === 'direct' ? paymentMode : 'standard',
     })
     navigate(`/comparison-tests/${test.id}`)
   }
@@ -147,8 +160,10 @@ export default function RunBenchmark() {
     }
   }
 
+  const configuredComparisonCodes = comparisonCodes.filter((code) =>
+    gateways.find((item) => item.code === code)?.configured)
   const canSubmit = mode === 'comparison'
-    ? comparisonCodes.length >= 2
+    ? configuredComparisonCodes.length >= 2
     : Boolean(selected?.configured)
 
   return (
@@ -181,9 +196,13 @@ export default function RunBenchmark() {
               const isSelected = mode === 'comparison'
                 ? comparisonCodes.includes(gateway.code)
                 : gatewayCode === gateway.code
-              const disabled = !gateway.configured
+              // An unconfigured gateway stays selectable on purpose. Making the card
+              // unclickable leaves someone who wants Geidea with a dead rectangle and
+              // no way to find out why; selecting it shows what is missing and links
+              // straight to the page that fixes it. The submit button is where the
+              // block belongs.
               return (
-                <button key={gateway.code} type="button" disabled={disabled}
+                <button key={gateway.code} type="button"
                         onClick={() => {
                           if (mode === 'comparison') {
                             setComparisonCodes((current) => current.includes(gateway.code)
@@ -196,7 +215,7 @@ export default function RunBenchmark() {
                         className={`rounded-xl border p-4 text-left transition
                           ${isSelected ? 'border-accent-500 bg-accent-50 ring-1 ring-accent-500'
                                        : 'border-ink-200 bg-white hover:border-ink-300'}
-                          ${disabled ? 'cursor-not-allowed opacity-60' : ''}`}>
+                          ${gateway.configured ? '' : 'opacity-75'}`}>
                   <div className="flex items-start justify-between gap-2">
                     <span className="text-sm font-semibold text-ink-900">{gateway.name}</span>
                     {gateway.is_simulated && <Badge tone="warn">simulator</Badge>}
@@ -259,6 +278,48 @@ export default function RunBenchmark() {
               </span>. The measured count is recorded against every transaction, so any
               divergence from the documentation is visible.
             </p>
+          )}
+
+          {integration === 'direct' && (selected?.supported_payment_modes?.length ?? 1) > 1 && (
+            <div className="mt-6 border-t border-ink-200 pt-6">
+              <p className="label">Payment mode</p>
+              <div className="grid gap-3 sm:grid-cols-3">
+                {(selected?.supported_payment_modes ?? ['standard']).map((value) => (
+                  <button key={value} type="button" onClick={() => setPaymentMode(value)}
+                          className={`rounded-xl border p-3 text-left transition
+                            ${paymentMode === value
+                              ? 'border-accent-500 bg-accent-50 ring-1 ring-accent-500'
+                              : 'border-ink-200 bg-white hover:border-ink-300'}`}>
+                    <span className="block text-sm font-semibold text-ink-900">
+                      {PAYMENT_MODE_LABELS[value] ?? value}
+                    </span>
+                    <span className="mt-1 block text-xs text-ink-500">
+                      {PAYMENT_MODE_HINTS[value]}
+                    </span>
+                  </button>
+                ))}
+              </div>
+
+              {paymentMode === 'token' && !tokenReady && (
+                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3
+                              text-xs text-amber-800">
+                  {selected?.name} has no stored card configured yet. A stored-token
+                  payment needs both a <strong>Card token ID</strong> and an{' '}
+                  <strong>Agreement ID</strong> on its settings. Run a{' '}
+                  <strong>Store card (tokenize)</strong> payment first — the token it
+                  returns is shown on the transaction page, ready to paste in.{' '}
+                  <Link to={`/settings?gateway=${selected?.code}`}
+                        className="font-medium underline">Open settings</Link>
+                </p>
+              )}
+              {paymentMode === 'store_card' && (
+                <p className="mt-3 text-xs text-ink-500">
+                  This pays and stores the card. The token and agreement come back on
+                  the transaction page; paste them into the gateway’s settings to charge
+                  the card again later without card details.
+                </p>
+              )}
+            </div>
           )}
 
           {integration === 'hpp' && mode !== 'single' && (
@@ -366,6 +427,45 @@ export default function RunBenchmark() {
           </p>
         )}
 
+        {/* A disabled button with no explanation is the single most confusing thing a
+            form can do. When this cannot be pressed, the reason and the fix are right
+            next to it. */}
+        {!canSubmit && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm
+                          text-amber-900">
+            {mode === 'comparison' ? (
+              <span>
+                Select at least two <strong>configured</strong> gateways to compare.
+                {comparisonCodes.length > configuredComparisonCodes.length && (
+                  <> Some of the gateways you picked have no credentials yet.</>
+                )}
+              </span>
+            ) : !selected ? (
+              <span>Select a gateway above.</span>
+            ) : (
+              <>
+                <p className="font-medium">
+                  {selected.name} has no credentials yet, so nothing can be sent to it.
+                </p>
+                <p className="mt-1">
+                  Add its sandbox credentials on the Settings page
+                  {selected.missing_fields.length > 0 && (
+                    <> — it still needs{' '}
+                      <span className="font-mono text-xs">
+                        {selected.missing_fields.join(', ')}
+                      </span></>
+                  )}. Or pick <strong>MockPay</strong> above to exercise the platform
+                  without any gateway account.
+                </p>
+                <Link to={`/settings?gateway=${selected.code}`}
+                      className="btn-secondary mt-3 inline-flex">
+                  Configure {selected.name}
+                </Link>
+              </>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center gap-3">
           <button type="submit" className="btn-primary" disabled={busy || !canSubmit}>
             {busy ? 'Starting…'
@@ -373,16 +473,6 @@ export default function RunBenchmark() {
               : mode === 'run' ? 'Start benchmark run'
               : 'Start comparison test'}
           </button>
-          {mode === 'comparison' && comparisonCodes.length < 2 && (
-            <span className="text-sm text-ink-500">
-              Select at least two gateways to compare.
-            </span>
-          )}
-          {mode !== 'comparison' && selected && !selected.configured && (
-            <span className="text-sm text-amber-600">
-              {selected.name} needs credentials before it can be benchmarked.
-            </span>
-          )}
         </div>
       </form>
     </div>

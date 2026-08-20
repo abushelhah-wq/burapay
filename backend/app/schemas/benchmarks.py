@@ -22,6 +22,10 @@ class StartTransactionRequest(BaseModel):
     description: str = Field(default="BuraPay benchmark transaction", max_length=255)
     environment: str = Field(default="sandbox", pattern="^(sandbox|production)$")
     methodology: str = Field(default="mixed", pattern="^(cold|warm|mixed)$")
+    #: standard | store_card | token. Only offered for gateways that declare support;
+    #: a stored-token payment charges a card the gateway already holds.
+    payment_mode: str = Field(default="standard",
+                              pattern="^(standard|store_card|token)$")
 
 
 class StartTransactionResponse(BaseModel):
@@ -33,6 +37,9 @@ class StartTransactionResponse(BaseModel):
     #: browser SDK mounted instead.
     mode: Optional[str] = None
     gateway_reference: Optional[str] = None
+    #: Present when a Store card payment minted one. Shown once, for copying into the
+    #: gateway's settings.
+    stored_token: Optional[str] = None
 
 
 class BenchmarkRunCreate(BaseModel):
@@ -47,6 +54,10 @@ class BenchmarkRunCreate(BaseModel):
     interval_seconds: Optional[float] = Field(default=None, ge=0, le=3600)
     environment: str = Field(default="sandbox", pattern="^(sandbox|production)$")
     methodology: str = Field(default="mixed", pattern="^(cold|warm|mixed)$")
+    #: standard | store_card | token. Only offered for gateways that declare support;
+    #: a stored-token payment charges a card the gateway already holds.
+    payment_mode: str = Field(default="standard",
+                              pattern="^(standard|store_card|token)$")
 
 
 class BenchmarkRunOut(ORMModel):
@@ -55,6 +66,7 @@ class BenchmarkRunOut(ORMModel):
     gateway_id: Optional[str] = None
     comparison_test_id: Optional[str] = None
     integration_type: str
+    payment_mode: str = "standard"
     environment: str
     currency: str
     amount: float
@@ -85,6 +97,10 @@ class ComparisonTestCreate(BaseModel):
     interval_seconds: Optional[float] = Field(default=None, ge=0, le=3600)
     environment: str = Field(default="sandbox", pattern="^(sandbox|production)$")
     methodology: str = Field(default="mixed", pattern="^(cold|warm|mixed)$")
+    #: standard | store_card | token. Only offered for gateways that declare support;
+    #: a stored-token payment charges a card the gateway already holds.
+    payment_mode: str = Field(default="standard",
+                              pattern="^(standard|store_card|token)$")
 
 
 class ComparisonTestOut(ORMModel):
@@ -149,6 +165,7 @@ class TransactionOut(ORMModel):
     gateway_transaction_id: Optional[str] = None
     merchant_reference: str
     integration_type: str
+    payment_mode: str = "standard"
     environment: str
     amount: float
     currency: str

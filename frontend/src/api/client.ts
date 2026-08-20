@@ -89,6 +89,7 @@ export interface TransactionFilters {
   gateway_code?: string[]
   integration_type?: string
   status?: string
+  payment_mode?: string
   currency?: string
   environment?: string
   benchmark_run_id?: string

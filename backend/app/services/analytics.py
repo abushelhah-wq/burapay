@@ -41,6 +41,7 @@ class TransactionFilters:
     def __init__(self, *, gateway_codes: Optional[Sequence[str]] = None,
                  integration_type: Optional[str] = None,
                  status: Optional[str] = None, currency: Optional[str] = None,
+                 payment_mode: Optional[str] = None,
                  environment: Optional[str] = None,
                  benchmark_run_id: Optional[str] = None,
                  merchant_reference: Optional[str] = None,
@@ -51,6 +52,7 @@ class TransactionFilters:
                  include_simulated: bool = True) -> None:
         self.gateway_codes = list(gateway_codes) if gateway_codes else None
         self.integration_type = integration_type
+        self.payment_mode = payment_mode
         self.status = status
         self.currency = currency.upper() if currency else None
         self.environment = environment
@@ -70,6 +72,8 @@ class TransactionFilters:
                 Transaction.gateway_code.notin_(tuple(SIMULATED_CODES)))
         if self.integration_type:
             statement = statement.where(Transaction.integration_type == self.integration_type)
+        if self.payment_mode:
+            statement = statement.where(Transaction.payment_mode == self.payment_mode)
         if self.status:
             statement = statement.where(Transaction.status == self.status)
         if self.currency:
@@ -142,17 +146,20 @@ async def comparison_table(session: AsyncSession, filters: TransactionFilters
 
     grouped: Dict[tuple, List[Transaction]] = {}
     for transaction in transactions:
-        grouped.setdefault((transaction.gateway_code, transaction.integration_type),
-                           []).append(transaction)
+        grouped.setdefault((transaction.gateway_code, transaction.integration_type,
+                            transaction.payment_mode or "standard"), []).append(transaction)
 
     rows: List[Dict[str, Any]] = []
-    for (code, integration), group in sorted(grouped.items()):
+    for (code, integration, mode), group in sorted(grouped.items()):
+        # A gateway that documents a separate call count for the mode gets that one.
+        docs = documented_calls(code) if code in names else {}
         entry = {
             "gateway_code": code,
             "gateway_name": names.get(code, code),
             "integration_type": integration,
+            "payment_mode": mode,
             "is_simulated": code in SIMULATED_CODES,
-            "documented_calls": documented_calls(code).get(integration) if code in names else None,
+            "documented_calls": docs.get(f"{integration}/{mode}") or docs.get(integration),
         }
         entry.update(_group_stats(group))
         rows.append(entry)
@@ -441,5 +448,10 @@ async def transaction_detail(session: AsyncSession, transaction: Transaction) ->
         "setup_call_time_ms": round(
             sum(m.duration_ms for m in transaction.measurements if m.is_setup_call), 3),
         "documented_calls": documented_calls(transaction.gateway_code).get(
-            transaction.integration_type),
+            f"{transaction.integration_type}/{transaction.payment_mode}")
+            or documented_calls(transaction.gateway_code).get(transaction.integration_type),
+        # Present only on the transaction that minted it. Shown so an operator can copy
+        # it into the gateway's settings; never written there automatically.
+        "stored_token": (transaction.context or {}).get("stored_token"),
+        "stored_token_hint": (transaction.context or {}).get("stored_token_hint"),
     }

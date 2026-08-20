@@ -48,7 +48,8 @@ async def create_run(payload: BenchmarkRunCreate, admin: User = Depends(require_
             integration_type=payload.integration_type, currency=payload.currency,
             amount=payload.amount, transaction_count=payload.transaction_count,
             interval_seconds=payload.interval_seconds, environment=payload.environment,
-            methodology=payload.methodology, created_by=admin.email)
+            methodology=payload.methodology, payment_mode=payload.payment_mode,
+            created_by=admin.email)
     except BenchmarkRefused as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     runner.start_run(run.id)
@@ -140,7 +141,8 @@ async def create_comparison_test(payload: ComparisonTestCreate,
             amount=payload.amount,
             transactions_per_gateway=payload.transactions_per_gateway,
             interval_seconds=payload.interval_seconds, environment=payload.environment,
-            methodology=payload.methodology, created_by=admin.email)
+            methodology=payload.methodology, payment_mode=payload.payment_mode,
+            created_by=admin.email)
     except BenchmarkRefused as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     runner.start_comparison(test.id, [run.id for run in runs])

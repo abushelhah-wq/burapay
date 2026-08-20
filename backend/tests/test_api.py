@@ -635,3 +635,78 @@ class TestHppHandoff:
         started = await run_transaction(client, auth_headers, integration_type="hpp")
         assert (await client.get(
             f"/v1/transactions/{started['transaction_id']}/hpp")).status_code == 401
+
+
+class TestPaymentModes:
+    """The admin-configured tokenisation flow, end to end through the API."""
+
+    async def test_gateways_advertise_their_payment_modes(self, client: AsyncClient,
+                                                          auth_headers: dict):
+        rows = (await client.get("/v1/gateways", headers=auth_headers)).json()
+        geidea = next(row for row in rows if row["code"] == "geidea")
+        assert set(geidea["supported_payment_modes"]) == {"standard", "store_card", "token"}
+        stripe = next(row for row in rows if row["code"] == "stripe")
+        assert stripe["supported_payment_modes"] == ["standard"]
+
+    async def test_the_agreement_fields_are_offered_on_the_settings_form(
+            self, client: AsyncClient, auth_headers: dict):
+        rows = (await client.get("/v1/gateways", headers=auth_headers)).json()
+        geidea = next(row for row in rows if row["code"] == "geidea")
+        fields = {f["key"]: f for f in geidea["credential_fields"]}
+        assert {"agreement_id", "agreement_type", "token_id"} <= set(fields)
+        # Optional: Geidea must still work for ordinary payments without them.
+        assert fields["agreement_id"]["required"] is False
+        assert fields["token_id"]["required"] is False
+        assert fields["agreement_type"]["choices"]
+
+    async def test_the_agreement_can_be_saved_and_is_reported_as_configured(
+            self, client: AsyncClient, auth_headers: dict):
+        await client.put("/v1/gateways/geidea/credentials", headers=auth_headers, json={
+            "environment": "sandbox",
+            "values": {"merchant_public_key": "pk_test", "api_password": "pw_test",
+                       "agreement_id": "agr_1", "token_id": "tok_9"}})
+        detail = (await client.get("/v1/gateways/geidea", headers=auth_headers)).json()
+        assert detail["configured"] is True
+        # Key names only — the UI uses these to know tokenisation is ready.
+        assert {"agreement_id", "token_id"} <= set(detail["configured_fields"])
+        assert "pk_test" not in (await client.get("/v1/gateways/geidea",
+                                                  headers=auth_headers)).text
+
+    async def test_a_mode_the_gateway_does_not_support_is_refused(
+            self, client: AsyncClient, auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        response = await client.post("/v1/transactions/start", headers=auth_headers, json={
+            "gateway_code": "mockpay", "integration_type": "direct", "amount": 1.0,
+            "currency": "SAR", "payment_mode": "token"})
+        assert response.status_code == 400
+        assert "payment mode" in response.json()["message"].lower()
+
+    async def test_transactions_record_and_filter_by_mode(self, client: AsyncClient,
+                                                          auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        await run_transaction(client, auth_headers)
+        listed = (await client.get("/v1/transactions", headers=auth_headers)).json()
+        assert listed["items"][0]["payment_mode"] == "standard"
+
+        filtered = (await client.get("/v1/transactions?payment_mode=token",
+                                     headers=auth_headers)).json()
+        assert filtered["total"] == 0
+
+    async def test_comparison_groups_by_mode(self, client: AsyncClient,
+                                             auth_headers: dict):
+        """A two-call token charge must never be averaged with a four-call one."""
+        await configure_mockpay(client, auth_headers)
+        await run_transaction(client, auth_headers)
+        rows = (await client.get("/v1/comparison?include_simulated=true",
+                                 headers=auth_headers)).json()["rows"]
+        assert all("payment_mode" in row for row in rows)
+        assert rows[0]["payment_mode"] == "standard"
+
+    async def test_benchmark_runs_carry_the_mode(self, client: AsyncClient,
+                                                 auth_headers: dict):
+        await configure_mockpay(client, auth_headers)
+        created = await client.post("/v1/benchmarks/runs", headers=auth_headers, json={
+            "name": "mode run", "gateway_code": "mockpay", "integration_type": "direct",
+            "transaction_count": 1, "amount": 1.0, "currency": "SAR",
+            "interval_seconds": 0})
+        assert created.json()["payment_mode"] == "standard"

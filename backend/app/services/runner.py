@@ -91,7 +91,7 @@ async def create_run(session: AsyncSession, *, name: str, gateway_code: str,
                      integration_type: str, currency: str, amount: float,
                      transaction_count: int, interval_seconds: Optional[float] = None,
                      environment: str = "sandbox", methodology: str = "mixed",
-                     created_by: Optional[str] = None,
+                     payment_mode: str = "standard", created_by: Optional[str] = None,
                      comparison_test_id: Optional[str] = None) -> BenchmarkRun:
     gateway = (await session.execute(
         select(Gateway).where(Gateway.code == gateway_code))).scalar_one_or_none()
@@ -105,7 +105,8 @@ async def create_run(session: AsyncSession, *, name: str, gateway_code: str,
 
     run = BenchmarkRun(
         name=name, gateway_id=gateway.id, comparison_test_id=comparison_test_id,
-        integration_type=integration_type, environment=environment, currency=currency.upper(),
+        integration_type=integration_type, payment_mode=payment_mode,
+        environment=environment, currency=currency.upper(),
         amount=amount, transaction_count=int(limits["transaction_count"]),
         interval_seconds=limits["interval_seconds"], methodology=methodology,
         status=RunStatus.QUEUED.value, created_by=created_by,
@@ -151,6 +152,7 @@ async def _execute_run(run_id: str) -> None:
                             session, gateway_code=gateway.code, amount=run.amount,
                             currency=run.currency, environment=run.environment,
                             benchmark_run_id=run.id, methodology=run.methodology,
+                            payment_mode=run.payment_mode,
                             description=f"{run.name} #{index + 1}")
                     else:
                         # Session creation only: nobody is on the hosted page.
@@ -228,6 +230,7 @@ async def create_comparison_test(session: AsyncSession, *, name: str,
                                  interval_seconds: Optional[float] = None,
                                  environment: str = "sandbox",
                                  methodology: str = "mixed",
+                                 payment_mode: str = "standard",
                                  created_by: Optional[str] = None
                                  ) -> tuple[ComparisonTest, List[BenchmarkRun]]:
     """Create one comparison test and an identical run per gateway.
@@ -254,8 +257,8 @@ async def create_comparison_test(session: AsyncSession, *, name: str,
             session, name=f"{name} — {code}", gateway_code=code,
             integration_type=integration_type, currency=currency, amount=amount,
             transaction_count=transactions_per_gateway, interval_seconds=interval_seconds,
-            environment=environment, methodology=methodology, created_by=created_by,
-            comparison_test_id=test.id))
+            environment=environment, methodology=methodology, payment_mode=payment_mode,
+            created_by=created_by, comparison_test_id=test.id))
     await session.commit()
     await session.refresh(test)
     return test, runs

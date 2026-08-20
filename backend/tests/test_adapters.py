@@ -208,6 +208,161 @@ class TestGeidea:
         await client.client.aclose()
 
 
+class TestGeideaTokenisation:
+    """Card on file: store a card in one payment, charge it in a later one."""
+
+    def adapter(self, **extra):
+        values = {"merchant_public_key": "pk_test", "api_password": "pw_test",
+                  "api_base": "https://geidea.test"}
+        values.update(extra)
+        return build_adapter("geidea", values)
+
+    def test_all_three_modes_are_declared(self):
+        assert set(self.adapter().supported_payment_modes) == {
+            "standard", "store_card", "token"}
+
+    def test_tokenisation_fields_are_optional(self):
+        """Geidea must still work for ordinary payments with no agreement configured."""
+        adapter = self.adapter()
+        assert adapter.is_configured() is True
+        assert "agreement_id" not in adapter.missing_credentials()
+        assert "token_id" not in adapter.missing_credentials()
+
+    async def test_store_card_asks_the_session_to_keep_the_card(self):
+        adapter = self.adapter()
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s1"}}),
+            "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
+                                                                "status": "Not Enrolled"}),
+            "/direct/pay": httpx.Response(200, json={
+                "responseCode": "000",
+                "order": {"orderId": "ord_1", "status": "Success", "tokenId": "tok_9",
+                          "paymentMethod": {"maskedCardNumber": "411111******1111",
+                                            "brand": "Visa"}}}),
+        }), requests)
+
+        result = await adapter.process_direct_payment(
+            client, request_for(payment_mode="store_card"))
+
+        # cardOnFile has to be on the session — it cannot be added at authorisation.
+        assert json.loads(requests[0].content)["cardOnFile"] is True
+        assert result.status is TransactionStatus.SUCCESS
+        assert result.stored_token == "tok_9"
+        assert result.stored_token_hint == "Visa card ending 1111"
+        await client.client.aclose()
+
+    async def test_standard_mode_does_not_store_the_card(self):
+        adapter = self.adapter()
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s1"}}),
+            "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
+                                                                "status": "Not Enrolled"}),
+            "/direct/pay": httpx.Response(200, json={"responseCode": "000",
+                                                     "order": {"orderId": "o",
+                                                               "status": "Success"}}),
+        }), requests)
+        result = await adapter.process_direct_payment(client, request_for())
+        assert "cardOnFile" not in json.loads(requests[0].content)
+        assert result.stored_token is None
+        await client.client.aclose()
+
+    async def test_store_card_says_so_when_no_token_comes_back(self):
+        """A payment that succeeds without tokenising leaves nothing to charge later."""
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s1"}}),
+            "/authenticate/initiate": httpx.Response(200, json={"responseCode": "000",
+                                                                "status": "Not Enrolled"}),
+            "/direct/pay": httpx.Response(200, json={"responseCode": "000",
+                                                     "order": {"orderId": "o",
+                                                               "status": "Success"}}),
+        }))
+        result = await adapter.process_direct_payment(
+            client, request_for(payment_mode="store_card"))
+        assert result.status is TransactionStatus.SUCCESS
+        assert result.stored_token is None
+        assert "no card token" in (result.gateway_message or "")
+        await client.client.aclose()
+
+    async def test_stored_token_payment_is_two_calls_and_sends_no_card(self):
+        adapter = self.adapter(token_id="tok_9", agreement_id="agr_1",
+                               agreement_type="unscheduled")
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s2"}}),
+            "/direct/pay/token": httpx.Response(200, json={
+                "responseCode": "000",
+                "order": {"orderId": "ord_2", "status": "Success"}}),
+        }), requests)
+
+        result = await adapter.process_direct_payment(
+            client, request_for(payment_mode="token", card=None))
+
+        assert result.status is TransactionStatus.SUCCESS
+        # Geidea needs a fresh session per charge, so this is two calls, not one.
+        assert len(client.timed_measurements) == 2
+        body = json.loads(requests[1].content)
+        assert body["tokenId"] == "tok_9"
+        assert body["agreementId"] == "agr_1"
+        assert body["agreementType"] == "unscheduled"
+        assert body["initiatedBy"] == "Merchant"
+        # The whole point: no card details travel with a merchant-initiated charge.
+        for forbidden in ("cardNumber", "cvv", "paymentMethod"):
+            assert forbidden not in body
+        await client.client.aclose()
+
+    async def test_stored_token_payment_refuses_without_the_agreement(self):
+        from app.core.errors import NotConfigured
+        adapter = self.adapter(token_id="tok_9")          # no agreement id
+        client = client_for(adapter, route({}))
+        with pytest.raises(NotConfigured) as excinfo:
+            await adapter.process_direct_payment(
+                client, request_for(payment_mode="token", card=None))
+        assert "Agreement ID" in str(excinfo.value)
+        # Nothing was sent: the refusal happens before any call.
+        assert client.measurements == []
+        await client.client.aclose()
+
+    async def test_stored_token_payment_refuses_without_a_token(self):
+        from app.core.errors import NotConfigured
+        adapter = self.adapter(agreement_id="agr_1")      # no token
+        client = client_for(adapter, route({}))
+        with pytest.raises(NotConfigured) as excinfo:
+            await adapter.process_direct_payment(
+                client, request_for(payment_mode="token", card=None))
+        assert "Card token ID" in str(excinfo.value)
+        await client.client.aclose()
+
+    async def test_the_initiator_is_configurable(self):
+        """A cardholder picking a saved card is not a merchant-initiated charge."""
+        adapter = self.adapter(token_id="t", agreement_id="a",
+                               card_on_file_initiator="Customer")
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, route({
+            "/direct/session": httpx.Response(200, json={"responseCode": "000",
+                                                         "session": {"id": "s"}}),
+            "/direct/pay/token": httpx.Response(200, json={"responseCode": "000",
+                                                           "order": {"orderId": "o",
+                                                                     "status": "Success"}}),
+        }), requests)
+        await adapter.process_direct_payment(
+            client, request_for(payment_mode="token", card=None))
+        assert json.loads(requests[1].content)["initiatedBy"] == "Customer"
+        await client.client.aclose()
+
+    async def test_gateways_without_the_capability_refuse_the_mode(self):
+        from app.core.errors import NotSupported
+        adapter = build_adapter("stripe", {"secret_key": "sk"})
+        with pytest.raises(NotSupported):
+            adapter.require_supports_mode("token")
+
+
 class TestStripe:
     def adapter(self):
         return build_adapter("stripe", {"secret_key": "sk_test_x",

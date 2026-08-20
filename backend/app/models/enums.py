@@ -18,6 +18,31 @@ class IntegrationType(str, Enum):
     DIRECT = "direct"
 
 
+class PaymentMode(str, Enum):
+    """How the card is presented for a Direct API payment.
+
+    A stored-credential payment is a different flow with a different call count from a
+    one-off card payment, so it is recorded and compared separately rather than
+    averaged in with it.
+    """
+
+    #: A one-off payment with card details. The default.
+    STANDARD = "standard"
+    #: A one-off payment that also asks the gateway to store the card and return a
+    #: token, so a later merchant-initiated charge has something to charge.
+    STORE_CARD = "store_card"
+    #: A merchant-initiated payment against a stored card. No card details are sent —
+    #: only the token and the agreement it was stored under.
+    TOKEN = "token"
+
+
+PAYMENT_MODE_LABELS = {
+    PaymentMode.STANDARD.value: "Standard card payment",
+    PaymentMode.STORE_CARD.value: "Store card (tokenize)",
+    PaymentMode.TOKEN.value: "Stored token (merchant-initiated)",
+}
+
+
 class GatewayEnvironment(str, Enum):
     SANDBOX = "sandbox"
     PRODUCTION = "production"

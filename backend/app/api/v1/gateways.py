@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_user, require_admin
 from app.core.crypto import DecryptionError
 from app.db.session import get_session
-from app.gateways.registry import (SIMULATED_CODES, credential_schema, documented_calls)
+from app.gateways.registry import (SIMULATED_CODES, adapter_class, credential_schema,
+                                   documented_calls)
 from app.models import Gateway, User
 from app.schemas import (CredentialUpdate, CredentialsOut, GatewayDetail,
                          GatewayHealthOut, GatewayOut, GatewayUpdate, Message)
@@ -29,9 +30,11 @@ async def _detail(session: AsyncSession, gateway: Gateway,
         **GatewayOut.model_validate(gateway).model_dump(),
         configured=status_info["configured"],
         missing_fields=status_info["missing_fields"],
+        configured_fields=status_info["configured_fields"],
         status=status_info["status"],
         credential_fields=credential_schema(gateway.code),
         documented_calls=documented_calls(gateway.code),
+        supported_payment_modes=list(adapter_class(gateway.code).supported_payment_modes),
         is_simulated=gateway.code in SIMULATED_CODES)
 
 

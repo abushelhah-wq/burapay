@@ -90,6 +90,23 @@ export function integrationLabel(value: string): string {
   return INTEGRATION_LABELS[value] ?? value
 }
 
+export const PAYMENT_MODE_LABELS: Record<string, string> = {
+  standard: 'Standard card payment',
+  store_card: 'Store card (tokenize)',
+  token: 'Stored token (merchant-initiated)',
+}
+
+export const PAYMENT_MODE_HINTS: Record<string, string> = {
+  standard: 'A one-off payment with card details. The usual case.',
+  store_card: 'Pays and asks the gateway to store the card, returning a token you can charge later.',
+  token: 'Charges a card the gateway already holds. Sends no card details, so there is nothing to authenticate.',
+}
+
+export function paymentModeLabel(value: string | null | undefined): string {
+  if (!value) return PAYMENT_MODE_LABELS.standard
+  return PAYMENT_MODE_LABELS[value] ?? value
+}
+
 /**
  * Whether a group has enough samples for its percentiles to mean anything.
  * Rendered next to the figure rather than used to hide it: the reader is told the

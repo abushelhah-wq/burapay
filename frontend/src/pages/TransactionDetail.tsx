@@ -15,7 +15,8 @@ import { collectReturnMetrics } from '../lib/browserMetrics'
 import type { TransactionDetail as Detail } from '../api/types'
 import { Badge, Card, DurationBar, EmptyState, ErrorNotice, Note, Spinner,
          StatusBadge } from '../components/ui'
-import { dateTime, integrationLabel, money, ms, msExact, seconds } from '../lib/format'
+import { dateTime, integrationLabel, money, ms, msExact, paymentModeLabel,
+         seconds } from '../lib/format'
 
 const OPERATION_TONE: Record<string, string> = {
   SESSION_CREATION: 'bg-sky-50 text-sky-700 ring-sky-600/20',
@@ -73,10 +74,13 @@ export default function TransactionDetail() {
             {transaction.merchant_reference}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <StatusBadge status={transaction.status} />
           <Badge>{transaction.environment}</Badge>
           <Badge>{transaction.methodology}</Badge>
+          {transaction.payment_mode && transaction.payment_mode !== 'standard' && (
+            <Badge tone="info">{paymentModeLabel(transaction.payment_mode)}</Badge>
+          )}
         </div>
       </header>
 
@@ -130,6 +134,37 @@ export default function TransactionDetail() {
         score. Only the first is the gateway’s API latency; the customer’s time on a
         hosted page is not something a gateway can be faster at.
       </Note>
+
+      {detail.stored_token && (
+        <Card title="Card token">
+          <p className="text-sm text-ink-700">
+            This payment stored the card. Paste the token into{' '}
+            <Link to={`/settings?gateway=${transaction.gateway_code}`}
+                  className="text-accent-600 hover:underline">
+              {transaction.gateway_code}’s settings
+            </Link>{' '}
+            to charge it again later without card details.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <code className="select-all break-all rounded-lg border border-ink-200
+                             bg-ink-50 px-3 py-2 font-mono text-sm text-ink-800">
+              {detail.stored_token}
+            </code>
+            <button type="button" className="btn-secondary"
+                    onClick={() => navigator.clipboard?.writeText(detail.stored_token ?? '')}>
+              Copy
+            </button>
+            {detail.stored_token_hint && (
+              <span className="text-xs text-ink-500">{detail.stored_token_hint}</span>
+            )}
+          </div>
+          <p className="mt-3 text-xs text-ink-500">
+            Shown here and nowhere else. The platform does not save it into the
+            gateway’s credentials on its own: a card token belongs to a cardholder, not
+            to the merchant account, and storing one is a decision to make deliberately.
+          </p>
+        </Card>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-5">
         <Card title="API performance" className="lg:col-span-3">
