@@ -60,6 +60,25 @@ else
   # that is not "bridge"/"host"/"none" is the one other applications join.
   SUGGESTED_NET="$(docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{"\n"}}{{end}}' \
                    "$TRAEFIK_ID" | grep -vE '^(bridge|host|none)$' | head -1)"
+  NETWORK_MODE="$(docker inspect -f '{{.HostConfig.NetworkMode}}' "$TRAEFIK_ID" 2>/dev/null)"
+
+  if [ "$NETWORK_MODE" = "host" ] || [ -z "$SUGGESTED_NET" ]; then
+    HOST_MODE=1
+    ok "Traefik uses host networking — there is no shared network to join."
+    echo "   It reaches containers by their address on an ordinary Docker bridge, so"
+    echo "   BuraPay needs no TRAEFIK_NETWORK and no override file. Use the compose"
+    echo "   file as it ships:"
+    echo
+    echo "       docker compose up -d"
+  else
+    HOST_MODE=0
+    ok "Traefik shares a Docker network: $SUGGESTED_NET"
+    echo "   Set TRAEFIK_NETWORK to it in .env and start with the override that joins"
+    echo "   that network:"
+    echo
+    echo "       docker compose -f docker-compose.yml \\"
+    echo "                      -f docker-compose.traefik-network.yml up -d"
+  fi
   echo
 
   # ------------------------------------------------------------------------- #
@@ -128,9 +147,18 @@ else
   bold "Suggested .env values — check them against the output above"
   # ------------------------------------------------------------------------- #
   echo "DOMAIN=$DOMAIN_TO_CHECK"
-  echo "TRAEFIK_NETWORK=${SUGGESTED_NET:-<read it from section 2>}"
   echo "TRAEFIK_ENTRYPOINT=${SUGGESTED_ENTRY:-<read it from section 3>}"
   echo "TRAEFIK_CERT_RESOLVER=${SUGGESTED_RESOLVER:-<read it from section 3>}"
+  if [ "${HOST_MODE:-1}" = "1" ]; then
+    echo "# TRAEFIK_NETWORK is not needed: this Traefik uses host networking."
+    echo
+    echo "Start with:  docker compose up -d"
+  else
+    echo "TRAEFIK_NETWORK=$SUGGESTED_NET"
+    echo
+    echo "Start with:  docker compose -f docker-compose.yml \\"
+    echo "                            -f docker-compose.traefik-network.yml up -d"
+  fi
   echo
   echo "These are inferred from what the other containers on this host do. They are a"
   echo "starting point, not an answer — confirm each one against the sections above."

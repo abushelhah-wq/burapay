@@ -243,7 +243,7 @@ Full list with commentary in [`.env.example`](.env.example). The ones that matte
 | `CORS_ORIGINS` | Comma-separated browser origins allowed to call the API. |
 | `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | The first administrator, created only when the platform has no users at all. |
 | `DOMAIN` | The host Traefik routes to this stack. |
-| `TRAEFIK_NETWORK` | The existing Traefik Docker network to join. Read it off the VPS — see [Traefik integration](#traefik-integration). |
+| `TRAEFIK_NETWORK` | Only when Traefik runs in its own Docker network — see [Traefik integration](#traefik-integration). |
 | `TRAEFIK_ENTRYPOINT` | The existing HTTPS entrypoint name. |
 | `TRAEFIK_CERT_RESOLVER` | The existing certificate resolver. |
 | `ALLOW_PRODUCTION_GATEWAYS` | Defaults to `false`. Sandbox-only enforcement lives in the benchmark engine, not the UI. |
@@ -426,9 +426,32 @@ applications on that host.
 
 | `.env` variable | What it is | How it fails if wrong |
 | --------------- | ---------- | --------------------- |
-| `TRAEFIK_NETWORK` | The Docker network Traefik is attached to | Loudly. The network is declared `external`, so `docker compose up` stops with *"network … declared as external, but could not be found"* and nothing starts. |
 | `TRAEFIK_ENTRYPOINT` | The HTTPS entrypoint name (`websecure`, `https`, …) | Quietly. Traefik never routes the domain and requests fall through to whatever its default is. |
 | `TRAEFIK_CERT_RESOLVER` | The certificate resolver (`letsencrypt`, `le`, `cloudflare`, …) | Quietly. Traefik serves its own self-signed certificate and browsers refuse the site. |
+| `TRAEFIK_NETWORK` | **Only** for a Traefik that runs in its own Docker network — see below | Loudly, and only if you use the override: the network is `external`, so compose stops rather than starting a stack Traefik cannot see. |
+
+### Two Traefik topologies, and which you have
+
+`./scripts/inspect-traefik.sh` tells you which, and prints the command to use.
+
+**Traefik in host network mode** — the common single-VPS arrangement. There is no
+shared network to join: Traefik discovers containers through the Docker provider and
+connects to them by their address on an ordinary bridge. Nothing extra to configure:
+
+```bash
+docker compose up -d
+```
+
+**Traefik in its own Docker network.** Set `TRAEFIK_NETWORK` and add the override that
+joins it:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.traefik-network.yml up -d
+```
+
+Either way the services sit on a `web` bridge with a fixed name (`burapay_web`) so the
+`traefik.docker.network` label is predictable regardless of the directory this was
+cloned into — and PostgreSQL stays off it entirely.
 
 The script reads them off the running Traefik container and off what the host's other
 applications already do, then prints a suggested `.env` block. Confirm each value

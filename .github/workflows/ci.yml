@@ -166,8 +166,13 @@ jobs:
         # produces /api/api/v1/... in production.
         run: |
           pip install pyyaml
-          docker compose config > /tmp/rendered-compose.yml
-          python3 scripts/check_traefik_wiring.py /tmp/rendered-compose.yml
+          # Both supported topologies: host-mode Traefik (the base file) and a
+          # Traefik with its own network (the override).
+          docker compose config > /tmp/base.yml
+          python3 scripts/check_traefik_wiring.py /tmp/base.yml
+          TRAEFIK_NETWORK=proxy docker compose \
+            -f docker-compose.yml -f docker-compose.traefik-network.yml config > /tmp/override.yml
+          python3 scripts/check_traefik_wiring.py /tmp/override.yml
 
       - name: Check the inspection script
         run: bash -n scripts/inspect-traefik.sh

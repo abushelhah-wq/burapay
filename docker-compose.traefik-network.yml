@@ -1,0 +1,28 @@
+# Override for hosts where Traefik runs in its own Docker network rather than in host
+# network mode.
+#
+#     docker compose -f docker-compose.yml -f docker-compose.traefik-network.yml up -d
+#
+# Set TRAEFIK_NETWORK in .env to the name of that network first — ./scripts/inspect-traefik.sh
+# prints it. The network is declared external, so this project never creates, renames
+# or removes the one Traefik already owns; a wrong name fails immediately rather than
+# starting a stack Traefik cannot see.
+#
+# The base file needs no override on a host where Traefik uses host networking, which
+# is the more common arrangement on a single VPS.
+
+services:
+  backend:
+    networks: [internal, web, traefik]
+    labels:
+      - "traefik.docker.network=${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK in .env}"
+
+  frontend:
+    networks: [web, traefik]
+    labels:
+      - "traefik.docker.network=${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK in .env}"
+
+networks:
+  traefik:
+    external: true
+    name: ${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK in .env}
