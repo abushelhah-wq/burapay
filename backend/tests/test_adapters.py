@@ -1066,3 +1066,120 @@ class TestGeideaErrorReporting:
         assert "not enabled for Direct API" not in str(excinfo.value)
         assert "Insufficient funds" in str(excinfo.value)
         await client.client.aclose()
+
+
+class TestMoyasarThreeDs:
+    """A Direct payment that stops at "initiated" has not been attempted yet."""
+
+    def adapter(self, **extra):
+        values = {"secret_key": "sk_test", "api_base": "https://moyasar.test",
+                  "direct_mode": "card"}
+        values.update(extra)
+        return build_adapter("moyasar", values)
+
+    def _routes(self, source: Dict[str, Any], status: str = "initiated"):
+        payment = {"id": "pay_1", "status": status, "amount": 100, "currency": "SAR",
+                   "source": source}
+        return route({
+            "POST /v1/payments": httpx.Response(201, json=payment),
+            "GET /v1/payments": httpx.Response(200, json=payment),
+        })
+
+    async def test_it_sends_the_cardholder_to_the_3ds_page(self):
+        adapter = self.adapter()
+        client = client_for(adapter, self._routes({
+            "type": "creditcard", "transaction_url": "https://moyasar.test/3ds/abc"}))
+        result = await adapter.process_direct_payment(client, request_for())
+
+        assert result.requires_customer_action is True
+        assert result.three_ds_required is True
+        assert result.status is TransactionStatus.PENDING
+        assert result.action_url == "https://moyasar.test/3ds/abc"
+        assert result.context["payment_id"] == "pay_1"
+        await client.client.aclose()
+
+    async def test_the_customer_comes_back_to_the_return_leg_not_the_webhook(self):
+        """The callback_url is where the *customer* lands, so it has to be the return."""
+        adapter = self.adapter()
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, self._routes({"transaction_url": "https://x/3ds"}),
+                            requests)
+        await adapter.process_direct_payment(client, request_for())
+        body = requests[0].content.decode()
+        assert "callback_url=https%3A%2F%2Fbusrapay.test%2Freturn" in body
+        await client.client.aclose()
+
+    async def test_a_paid_payment_does_not_pause(self):
+        adapter = self.adapter()
+        client = client_for(adapter, self._routes({"type": "creditcard"}, status="paid"))
+        result = await adapter.process_direct_payment(client, request_for())
+        assert result.requires_customer_action is False
+        assert result.status is TransactionStatus.SUCCESS
+        await client.client.aclose()
+
+    async def test_the_resume_leg_reads_the_outcome_from_the_payment(self):
+        """Moyasar puts the result on the payment, and its own query string is not evidence."""
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "GET /v1/payments": httpx.Response(200, json={
+                "id": "pay_1", "status": "paid", "source": {"type": "creditcard"}}),
+        }))
+        result = await adapter.complete_direct_payment(
+            client, request_for(card=None), {"payment_id": "pay_1"},
+            {"status": "failed"})          # a lie in the URL must not win
+        assert result.status is TransactionStatus.SUCCESS
+        assert len(client.timed_measurements) == 1
+        await client.client.aclose()
+
+
+class TestHyperPayThreeDsConfiguration:
+    def adapter(self, **extra):
+        values = {"entity_id": "e1", "access_token": "tok",
+                  "api_base": "https://oppwa.test"}
+        values.update(extra)
+        return build_adapter("hyperpay", values)
+
+    def _routes(self, body: Dict[str, Any]):
+        return route({"/v1/payments": httpx.Response(200, json=body)})
+
+    async def test_the_config_rejection_says_it_is_an_account_setting(self):
+        """100.390.106 is rejected before the issuer is contacted. No payload fixes it."""
+        adapter = self.adapter()
+        client = client_for(adapter, self._routes({
+            "id": "p1", "paymentBrand": "VISA",
+            "result": {"code": "100.390.106",
+                       "description": "Transaction rejected because of error in "
+                                      "3DSecure configuration"},
+            "resultDetails": {"clearingInstituteName": "SAIB MPGS"}}))
+        result = await adapter.process_direct_payment(client, request_for())
+        message = result.gateway_message or ""
+        # The acquirer's own words survive — that is the half that identifies the end.
+        assert "SAIB MPGS" in message
+        assert "not configured for this entity" in message
+        assert "3DS test scenario" in message
+        await client.client.aclose()
+
+    async def test_the_test_scenario_is_off_unless_asked_for(self):
+        adapter = self.adapter()
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, self._routes({
+            "id": "p1", "result": {"code": "000.100.110", "description": "ok"}}), requests)
+        await adapter.process_direct_payment(client, request_for())
+        body = requests[0].content.decode()
+        assert "testMode" not in body
+        assert "3DS2_enrolled" not in body
+        await client.client.aclose()
+
+    async def test_the_test_scenario_sends_oppwa_documented_parameters(self):
+        adapter = self.adapter(three_ds_test_scenario="challenge")
+        requests: List[httpx.Request] = []
+        client = client_for(adapter, self._routes({
+            "id": "p1", "result": {"code": "000.100.110", "description": "ok"}}), requests)
+        await adapter.process_direct_payment(client, request_for())
+        body = requests[0].content.decode()
+        assert "testMode=EXTERNAL" in body
+        assert "3DS2_enrolled" in body and "true" in body
+        assert "challenge" in body
+        # The shopper has to have somewhere to come back to.
+        assert "shopperResultUrl" in body
+        await client.client.aclose()

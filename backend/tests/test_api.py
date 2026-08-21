@@ -378,6 +378,12 @@ class TestTransactionLifecycle:
         assert response.status_code == 200
         assert "issuer.test" in response.text
 
+        # A form of hidden inputs renders as nothing. The document has to submit it,
+        # and has to say something while it does — a blank page is what this fixed.
+        assert "<!doctype html>" in response.text.lower()
+        assert "Taking you to your bank" in response.text
+        assert "form.submit()" in response.text
+
         csp = response.headers["content-security-policy"]
         assert csp.startswith("sandbox ")
         # allow-same-origin would hand the issuer's markup our cookies and storage.
@@ -385,6 +391,28 @@ class TestTransactionLifecycle:
         # ...and without this the issuer cannot send the cardholder back to us.
         assert "allow-top-navigation" in csp
         assert response.headers["cache-control"] == "no-store"
+
+    async def test_a_challenge_with_no_form_says_so_instead_of_showing_nothing(
+            self, client: AsyncClient, auth_headers: dict):
+        """A gateway that sends something unexpected is a fact worth seeing."""
+        from app.db.session import get_sessionmaker
+        from app.models import Transaction
+
+        await configure_mockpay(client, auth_headers, scenario="three_ds_challenge")
+        started = await run_transaction(client, auth_headers)
+        async with get_sessionmaker()() as session:
+            transaction = await session.get(Transaction, started["transaction_id"])
+            context = dict(transaction.context or {})
+            context["adapter_context"] = {"challenge_html": "<p>nothing useful</p>"}
+            transaction.context = context
+            await session.commit()
+
+        response = await client.get(
+            f"/v1/transactions/{started['transaction_id']}/three-ds/challenge")
+        assert response.status_code == 200
+        assert "No challenge to show" in response.text
+        # Shown escaped, not injected: it is not markup we are willing to run.
+        assert "&lt;p&gt;nothing useful&lt;/p&gt;" in response.text
 
     async def test_the_challenge_document_refuses_when_nothing_is_waiting(
             self, client: AsyncClient, auth_headers: dict):

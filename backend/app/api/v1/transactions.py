@@ -14,6 +14,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin
+from app.api.v1.three_ds import (FORM_PATTERN, challenge_document,
+                                 no_form_document)
 from app.core.config import settings as app_settings
 from app.core.errors import BenchmarkError, NotConfigured, NotSupported
 from app.core.logging import get_logger
@@ -254,12 +256,23 @@ async def three_ds_challenge_document(transaction_id: str,
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
                             detail="That transaction is not waiting for a 3DS challenge.")
 
-    html = (dict(context.get("adapter_context") or {})).get("challenge_html")
-    if not html:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
-                            detail="The gateway returned no challenge form for this "
-                                   "payment.")
-    return HTMLResponse(html, headers={
+    markup = (dict(context.get("adapter_context") or {})).get("challenge_html")
+    if markup and FORM_PATTERN.search(markup):
+        page = challenge_document(markup, gateway=transaction.gateway_code,
+                                  amount=transaction.amount,
+                                  currency=transaction.currency)
+    else:
+        # Never a blank page. A fragment with no form in it is not a challenge, and
+        # showing what did arrive is worth more than an empty screen.
+        logger.warning("3ds challenge had no form",
+                       extra={"gateway": transaction.gateway_code,
+                              "transaction_id": transaction.id,
+                              "operation": "three_ds_challenge", "status": "empty",
+                              "duration_ms": float(len(markup or ""))})
+        page = no_form_document(markup, gateway=transaction.gateway_code,
+                                transaction_id=transaction.id)
+
+    return HTMLResponse(page, headers={
         # No allow-same-origin: that is the whole point. allow-top-navigation lets the
         # issuer send the browser back to us when the cardholder is done.
         "Content-Security-Policy":

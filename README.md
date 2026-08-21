@@ -397,6 +397,36 @@ Three more details that are easy to get wrong and produce nothing but a generic 
   Omitting them gets `detailedResponseCode=013` "Internal Server Error", which does not
   say which field it disliked — so the adapter always sends all of them.
 
+### Moyasar Direct API: it pauses too
+
+A Moyasar Direct payment authorises nothing on its own. It is created as `initiated` and
+stays there until the cardholder has been through the 3DS page at
+`source.transaction_url`. A run that reports `initiated` and stops has recorded a payment
+that was never actually attempted — so the platform sends them there and finishes on the
+way back, the same two-legged shape as Geidea's challenge.
+
+`callback_url` is where Moyasar sends the *customer*, so it is this platform's return
+leg, not the webhook URL. Pointing it at the webhook is what left those payments stuck.
+
+### HyperPay result code 100.390.106
+
+`Transaction rejected because of error in 3DSecure configuration` is an **account
+setting, not a payload problem**. OPPWA rejects the payment before it ever reaches the
+issuer, because 3-D Secure is not enabled for that entity and card brand. No request
+change fixes it: ask HyperPay to enable 3DS2 for the entity id, quoting the clearing
+institute in `resultDetails` if there is one.
+
+Against a **sandbox** entity there is a way to test the flow anyway. Set the *3DS test
+scenario* on HyperPay's settings page to `challenge` or `frictionless` and the adapter
+sends OPPWA's documented test parameters — `testMode=EXTERNAL`,
+`customParameters[3DS2_enrolled]=true`, `customParameters[3DS2_flow]` — so a test entity
+simulates an enrolled card. It is off by default and should stay off on an entity that is
+genuinely 3DS-enabled: it replaces a real authentication outcome with a simulated one,
+which is not a thing to benchmark by accident.
+
+`resultDetails` is now reported alongside `result.code` on every HyperPay outcome. On a
+rejection it is frequently the only part that says which end the problem is at.
+
 ### Call Log
 
 Geidea answers a malformed request with `responseCode=100` "General error" and a detailed
@@ -479,13 +509,25 @@ back to this application's return URL, and inside a frame that return is refused
 own `X-Frame-Options: DENY` — the cardholder is left looking at an empty box. At the top
 level the header never applies.
 
-That leaves the other problem: when the issuer hands back an auto-submitting form rather
-than a URL, that markup would then be running on our own host. So it is served from
+That leaves the other problem: when the issuer hands back a form rather than a URL, that
+markup would then be running on our own host. So it is served from
 `/api/v1/transactions/{id}/three-ds/challenge` under
 `Content-Security-Policy: sandbox allow-forms allow-scripts allow-top-navigation`. With
 no `allow-same-origin` the document lands in an opaque origin: it can post itself to the
 issuer and navigate the window, and it cannot read this application's cookies, storage
 or DOM. The route answers only while that transaction is actually waiting.
+
+**A fragment is not a page.** What gateways return under names like `htmlBodyContent` is
+a body fragment: a form of *hidden* inputs addressed to the issuer's access control
+server. Hidden inputs render as nothing, and plenty of gateways expect the merchant to
+submit the form rather than shipping a script that does it — so serving the fragment
+directly produces a blank screen. It is wrapped in a real document that submits the form
+itself, says what it is doing while it happens, and offers a button if the automatic
+submit does not fire.
+
+If what arrived contains no form at all, the page says so and shows what was stored,
+escaped rather than injected. A gateway sending something unexpected here is a fact
+worth seeing, not something to render blindly.
 
 The card **does not survive the pause**. It is not written down, not held between
 requests and not put in the transaction's context, so the Pay call on the way back

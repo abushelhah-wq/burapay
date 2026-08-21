@@ -65,11 +65,15 @@ class MoyasarAdapter(PaymentGatewayAdapter):
         "configurable so the measurement always says which one it measured.",
         "Void has roughly a two-hour post-capture window; after that only refund works.",
         "Amounts are transmitted in halalas. A 1.00 SAR benchmark is sent as 100.",
+        "A Direct payment does not authorise anything on its own: it is created as "
+        "'initiated' and stays there until the cardholder has been through the 3DS page "
+        "at source.transaction_url. The platform sends them there and finishes the "
+        "payment when they return; the wait in between is customer interaction time.",
     )
 
     documented_calls = {
         "hpp": "2 (create invoice + fetch)",
-        "direct": "2 raw-card / 3 tokenize-first",
+        "direct": "2 raw-card / 3 tokenize-first, plus 1 on the way back from 3DS",
     }
 
     @property
@@ -166,7 +170,11 @@ class MoyasarAdapter(PaymentGatewayAdapter):
             "amount": str(self.minor_units(request.amount)),
             "currency": request.currency,
             "description": request.description[:255],
-            "callback_url": request.webhook_url or request.return_url,
+            # Where Moyasar sends the *customer* after 3DS, so it must be the return
+            # leg and not the webhook. Sending them to the webhook is why a Direct
+            # payment used to stop at "initiated" and stay there: the cardholder was
+            # never taken to the authentication page, and nothing ever came back.
+            "callback_url": request.return_url or request.webhook_url,
         }
         if (self.get("direct_mode") or "token").lower() == "token":
             token = await self._token(client, card)
@@ -190,7 +198,52 @@ class MoyasarAdapter(PaymentGatewayAdapter):
         fetched = await self.expect_ok(client, status_response, "fetch payment", accept=(200,))
         self._annotate(client, fetched)
         result = self._outcome(fetched)
-        result.three_ds_required = bool((fetched.get("source") or {}).get("transaction_url"))
+        source = fetched.get("source") or {}
+        transaction_url = source.get("transaction_url")
+        result.three_ds_required = bool(transaction_url)
+
+        if transaction_url and result.status is TransactionStatus.PENDING:
+            # This is the normal path, not an edge case. Moyasar authorises nothing
+            # until the cardholder has been through 3DS: the payment sits at
+            # "initiated" and the only way forward is to send them to
+            # source.transaction_url. Reporting "initiated" and stopping — which is
+            # what this did — records a payment that was never actually attempted.
+            payment_id = self._id(fetched)
+            return PaymentResult(
+                status=TransactionStatus.PENDING,
+                gateway_reference=payment_id,
+                gateway_code=str(source.get("message") or fetched.get("status") or ""),
+                gateway_message="3DS authentication required; awaiting the cardholder",
+                three_ds_required=True, requires_customer_action=True,
+                action_url=str(transaction_url),
+                context={"payment_id": payment_id},
+                raw=fetched)
+        return result
+
+    async def complete_direct_payment(self, client: InstrumentedClient,
+                                      request: PaymentRequest,
+                                      context: Mapping[str, Any],
+                                      params: Mapping[str, str]) -> PaymentResult:
+        """Read the outcome once the cardholder is back from 3DS.
+
+        Moyasar puts the result on the payment itself, so this is one fetch. Its own
+        query string carries a status and an id, but the pull is treated as
+        authoritative: it is the leg the merchant controls and can retry, and a value
+        copied out of a URL the customer's browser just carried is not evidence.
+        """
+        payment_id = (context.get("payment_id") or params.get("id")
+                      or params.get("payment_id"))
+        if not payment_id:
+            raise GatewayError(
+                "Moyasar: cannot resume this payment — the payment id it paused on was "
+                "not recorded.")
+        response = await client.call(
+            "GET /v1/payments/{id}", "GET", self._url(f"/v1/payments/{payment_id}"),
+            normalized=NormalizedOperation.STATUS_CHECK)
+        body = await self.expect_ok(client, response, "fetch payment", accept=(200,))
+        self._annotate(client, body)
+        result = self._outcome(body)
+        result.three_ds_required = True
         return result
 
     async def get_payment_status(self, client: InstrumentedClient,

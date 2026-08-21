@@ -55,6 +55,11 @@ class HyperPayAdapter(PaymentGatewayAdapter):
                         default="flat", choices=("flat", "nested"),
                         help_text="flat = /v1/payments/{id}; nested = /v1/payments/{id}/payments. Switch if refunds are rejected."),
         CredentialField("card_brand", "Test card brand", required=False, default="VISA"),
+        CredentialField("three_ds_test_scenario", "3DS test scenario", required=False,
+                        default="off", choices=("off", "challenge", "frictionless"),
+                        help_text="Sandbox only. Sends OPPWA's documented 3DS2 test parameters so a test entity simulates an enrolled card. Leave off for an entity that is genuinely 3DS-enabled — these force a simulated outcome rather than a real one."),
+        CredentialField("shopper_result_url", "Shopper result URL", required=False,
+                        help_text="Overrides where the shopper is returned after a Direct API 3DS challenge. Defaults to this platform's own return leg, which is almost always what you want."),
     )
 
     notes = (
@@ -64,6 +69,10 @@ class HyperPayAdapter(PaymentGatewayAdapter):
         "The back-office URL shape for capture/refund/reversal is inferred from Peach "
         "Payments on the same OPPWA engine; HyperPay's own tutorial pages were "
         "unreachable during research. Switch it on this page if a refund is rejected.",
+        "Result code 100.390.106 is an account setting, not a payload problem: OPPWA "
+        "rejects the payment before it reaches the issuer because 3DS is not enabled "
+        "for that entity and brand. No request change fixes it; a sandbox entity can "
+        "simulate an enrolled card with the 3DS test scenario on this page.",
         "The Copy&Pay status read is throttled to 2 calls per minute per checkout and "
         "the checkout id is single-use once final — keep HPP benchmark intervals above "
         "the default when running against HyperPay.",
@@ -93,6 +102,23 @@ class HyperPayAdapter(PaymentGatewayAdapter):
         data.update({key: str(value) for key, value in extra.items()})
         return data
 
+    def _three_ds_test_data(self) -> Dict[str, str]:
+        """OPPWA's documented 3DS2 test parameters, when a test scenario is chosen.
+
+        These make a test entity behave as though the card were enrolled. They are off
+        by default and only ever appropriate against a sandbox: on an entity that is
+        genuinely 3DS-enabled they replace a real authentication outcome with a
+        simulated one, which is not a thing to benchmark by accident.
+        """
+        scenario = (self.get("three_ds_test_scenario") or "off").lower()
+        if scenario == "off":
+            return {}
+        return {
+            "testMode": "EXTERNAL",
+            "customParameters[3DS2_enrolled]": "true",
+            "customParameters[3DS2_flow]": scenario,
+        }
+
     def _card_data(self, card: Card) -> Dict[str, str]:
         return {"paymentBrand": self.get("card_brand") or "VISA",
                 "card.number": card.number, "card.holder": card.holder,
@@ -119,8 +145,39 @@ class HyperPayAdapter(PaymentGatewayAdapter):
         ok = status in (TransactionStatus.SUCCESS, TransactionStatus.PENDING)
         client.annotate_last(code=code, message=description, success=ok,
                              category=None if ok else ErrorCategory.GATEWAY_DECLINE)
+        message = f"result.code={code!r} ({description!r})"
+        # resultDetails carries the acquirer's own words, and on a rejection it is
+        # frequently the only part that identifies which end the problem is at.
+        details = body.get("resultDetails") or {}
+        if isinstance(details, dict) and details:
+            rendered = ", ".join(f"{key}={value!r}" for key, value in
+                                 sorted(details.items()) if value)
+            if rendered:
+                message = f"{message} — {rendered}"
         return PaymentResult(status, body.get("id"), code,
-                             f"result.code={code!r} ({description!r})", raw=body)
+                             f"{message}{self._hint(code)}", raw=body)
+
+    def _hint(self, code: str) -> str:
+        """A note on what to check, for the codes that need one.
+
+        Only for causes this application can actually name. An acquirer-side
+        configuration problem is not something a request change will fix, and saying so
+        is more useful than implying a payload tweak might help.
+        """
+        if code != "100.390.106":
+            return ""
+        scenario = (self.get("three_ds_test_scenario") or "off").lower()
+        note = (
+            ". OPPWA rejected this before contacting the issuer: 3-D Secure is not "
+            "configured for this entity and brand. That is set on the account, not in "
+            "the request, so ask HyperPay to enable 3DS2 for this entity id — quoting "
+            "the clearing institute named above if there is one")
+        if scenario == "off":
+            note += (
+                ". Against a sandbox entity you can also set the 3DS test scenario on "
+                "this gateway's settings page, which sends OPPWA's documented test "
+                "parameters so an enrolled card is simulated")
+        return note
 
     def _require_ok(self, result: PaymentResult, what: str) -> PaymentResult:
         if result.status in (TransactionStatus.FAILED, TransactionStatus.DECLINED,
@@ -179,6 +236,12 @@ class HyperPayAdapter(PaymentGatewayAdapter):
         data = self._base_data(request, paymentType="DB",
                                merchantTransactionId=request.reference)
         data.update(self._card_data(request.card))
+        data.update(self._three_ds_test_data())
+        # Where the shopper comes back to after a challenge. OPPWA needs this on the
+        # payment itself for Direct API, not only on a Copy&Pay checkout.
+        result_url = self.get("shopper_result_url") or request.return_url
+        if result_url:
+            data["shopperResultUrl"] = result_url
         response = await client.call(
             "POST /v1/payments (DB)", "POST", self._url("/v1/payments"),
             normalized=NormalizedOperation.AUTHORIZATION, data=data)
