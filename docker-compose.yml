@@ -88,7 +88,7 @@ services:
 
       # Every gateway-facing return and callback URL is built from this. It is
       # the only place a domain appears anywhere in the system.
-      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://${DOMAIN:?set DOMAIN or PUBLIC_BASE_URL in .env}}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://${DOMAIN:-localhost}}"
       CORS_ORIGINS: "${CORS_ORIGINS:-}"
       DOMAIN: "${DOMAIN:-}"
 
@@ -133,7 +133,7 @@ services:
       REDIS_URL: "redis://redis:6379/0"
       APP_SECRET_KEY: "${APP_SECRET_KEY:?set APP_SECRET_KEY in .env}"
       ENCRYPTION_KEY: "${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}"
-      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://${DOMAIN:?set DOMAIN or PUBLIC_BASE_URL in .env}}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://${DOMAIN:-localhost}}"
       ALLOW_PRODUCTION_GATEWAYS: "${ALLOW_PRODUCTION_GATEWAYS:-false}"
       ALLOW_DIRECT_CARD_ENTRY: "${ALLOW_DIRECT_CARD_ENTRY:-0}"
       BENCHMARK_MIN_INTERVAL_SECONDS: "${BENCHMARK_MIN_INTERVAL_SECONDS:-60}"
@@ -155,6 +155,11 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
+    # Only started when you ask for it, so a host that already terminates TLS
+    # (Traefik, or anything else) never has Caddy competing for ports 80/443:
+    #   docker compose --profile caddy up -d      <- bundled TLS
+    #   docker compose up -d                      <- no Caddy; front it yourself
+    profiles: ["caddy"]
     depends_on:
       - app
       - frontend
@@ -162,8 +167,14 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      DOMAIN: "${DOMAIN:?set DOMAIN in .env}"
-      ACME_EMAIL: "${ACME_EMAIL:?set ACME_EMAIL in .env}"
+      # Deliberately NOT hard-required (`:?`). Compose interpolates the whole
+      # file no matter which services you name, so a `:?` here would stop
+      # `docker compose up -d app frontend` from starting -- and would demand an
+      # ACME address on a host that runs Traefik and never starts Caddy at all.
+      # Caddy itself fails loudly at runtime if it is actually used without a
+      # real domain, which is the right place for that check.
+      DOMAIN: "${DOMAIN:-localhost}"
+      ACME_EMAIL: "${ACME_EMAIL:-}"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data      # certificates live here -- keep this volume

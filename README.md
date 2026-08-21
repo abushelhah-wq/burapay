@@ -202,12 +202,20 @@ legacy/                      the previous release — see legacy/README.md
 
 ## Deploying
 
-The deploy sequence, unchanged:
+The backend service is named **`app`** (not `backend`), and the stack is:
+`db`, `redis`, `app`, `worker`, `frontend`, plus an optional `caddy`.
 
 ```bash
 git pull
 docker compose build
-docker compose up -d
+docker compose up -d          # db, redis, app, worker, frontend
+```
+
+Caddy is behind a profile, so it never competes for ports 80/443 on a host that
+already terminates TLS:
+
+```bash
+docker compose --profile caddy up -d    # add the bundled Caddy + Let's Encrypt
 ```
 
 Migrations run automatically when the `app` container starts, so there is no
