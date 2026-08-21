@@ -50,6 +50,9 @@ services:
       retries: 20
       start_period: 10s
     # No ports: mapping. Postgres is reachable only from the compose network.
+    labels:
+      # A database behind a reverse proxy is a database on the internet.
+      - "traefik.enable=false"
 
   redis:
     image: redis:7-alpine
@@ -62,6 +65,8 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+    labels:
+      - "traefik.enable=false"
 
   app:
     build:
@@ -110,6 +115,23 @@ services:
       GEIDEA_API_BASE: "${GEIDEA_API_BASE:-}"
     expose:
       - "8000"
+    networks: [default, web]
+    labels:
+      # Traefik in HOST network mode -- the usual single-VPS arrangement -- can
+      # reach these containers on the bridge directly, so no override is needed.
+      # For a Traefik that lives in its own Docker network, add
+      # docker-compose.traefik-network.yml on top.
+      - "traefik.enable=true"
+      # Required because this container is on two networks: without it Traefik
+      # has to guess which address to route to, and can pick the wrong one.
+      - "traefik.docker.network=${BURAPAY_WEB_NETWORK:-burapaynew_web}"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-api.rule=Host(`${DOMAIN:-busrapay.com}`) && (PathPrefix(`/api`) || Path(`/health`) || Path(`/healthz`))"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-api.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-api.tls=true"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-api.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      # Higher than the frontend's catch-all, so /api is not swallowed by it.
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-api.priority=100"
+      - "traefik.http.services.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-api.loadbalancer.server.port=8000"
 
   worker:
     build:
@@ -141,6 +163,9 @@ services:
       HTTP_TIMEOUT_SECONDS: "${HTTP_TIMEOUT_SECONDS:-30}"
       MEASUREMENT_LOCATION: "${MEASUREMENT_LOCATION:-}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    labels:
+      # The worker takes jobs off a queue; it serves no HTTP.
+      - "traefik.enable=false"
 
   frontend:
     build:
@@ -149,8 +174,18 @@ services:
     restart: unless-stopped
     expose:
       - "8080"
+    networks: [web]
     # Holds no credentials and reaches nothing but the browser. The bundle is
     # built at image build time, so this container serves static files only.
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=${BURAPAY_WEB_NETWORK:-burapaynew_web}"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-web.rule=Host(`${DOMAIN:-busrapay.com}`)"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-web.entrypoints=${TRAEFIK_ENTRYPOINT:-websecure}"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-web.tls=true"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-web.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      - "traefik.http.routers.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-web.priority=1"
+      - "traefik.http.services.${TRAEFIK_ROUTER_PREFIX:-burapaynew}-web.loadbalancer.server.port=8080"
 
   caddy:
     image: caddy:2-alpine
@@ -179,6 +214,17 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data      # certificates live here -- keep this volume
       - caddy-config:/config
+
+networks:
+  # Explicitly named, so the traefik.docker.network label above is correct no
+  # matter which directory this is deployed from -- Compose would otherwise
+  # prefix it with the folder name and the label would point at nothing.
+  #
+  # Override BURAPAY_WEB_NETWORK if you run a second copy of this stack on the
+  # same host; two stacks sharing a network name will fight over it.
+  web:
+    name: ${BURAPAY_WEB_NETWORK:-burapaynew_web}
+  default:
 
 volumes:
   db-data:
