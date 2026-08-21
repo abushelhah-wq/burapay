@@ -1,0 +1,28 @@
+# --- Web framework ---------------------------------------------------------
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
+python-multipart>=0.0.9
+
+# --- Database (async, per §1) ---------------------------------------------
+# asyncpg is the async driver; psycopg[binary] is used by Alembic for the
+# synchronous migration path so migrations do not need an event loop.
+sqlalchemy[asyncio]>=2.0.30
+asyncpg>=0.29.0
+psycopg[binary]>=3.1.18
+alembic>=1.13.0
+
+# --- Outbound HTTP (async) -------------------------------------------------
+# httpx is used ONLY by app/gateways/http_client.py. No other module may
+# import it -- see §0.3. tests/test_no_direct_http.py enforces that.
+httpx>=0.27.0
+
+# --- Background jobs -------------------------------------------------------
+redis>=5.0.0
+rq>=1.16.0
+
+# --- Security --------------------------------------------------------------
+cryptography>=42.0.0          # Fernet, for gateway_credentials at rest
+argon2-cffi>=23.1.0           # admin password hashing
+itsdangerous>=2.2.0           # signed session cookies (APP_SECRET_KEY)
