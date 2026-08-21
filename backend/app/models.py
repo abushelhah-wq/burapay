@@ -473,6 +473,11 @@ class BenchmarkRun(Base):
     operation: Mapped[str] = mapped_column(String(32), nullable=False)
     requested_count: Mapped[int] = mapped_column(Integer, nullable=False)
     completed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: The amount each transaction in the run charges. Stored on the run so a
+    #: re-queued job charges the same amount it was created for, rather than
+    #: falling back to a default that would quietly change the measurement.
+    amount_minor: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="SAR")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="PENDING")
     #: Populated when a run stops early -- cap reached, interval violated,
     #: gateway unavailable. Never left blank on a run that did not finish.

@@ -1,0 +1,66 @@
+# Override for a host that already runs Traefik.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.traefik-network.yml up -d
+#
+# What this changes:
+#   * Joins the existing external Traefik network named by TRAEFIK_NETWORK.
+#   * Adds Traefik router labels to `app` and `frontend`.
+#   * Scales the bundled `caddy` service to zero, since Traefik now owns 80/443
+#     and two things cannot bind the same ports.
+#
+# BEFORE USING THIS, run scripts/inspect-traefik.sh on the VPS and copy its
+# output into .env. TRAEFIK_NETWORK, TRAEFIK_ENTRYPOINT and TRAEFIK_CERT_RESOLVER
+# must be the values that host actually uses -- a guessed entrypoint or cert
+# resolver name produces a router Traefik silently ignores, which looks
+# identical to the app being down.
+#
+# Routing mirrors the Caddyfile exactly: /api and /health to the backend,
+# everything else to the frontend. The API router carries a higher priority so
+# it wins against the catch-all host rule.
+
+services:
+  caddy:
+    # Traefik terminates TLS instead. Compose has no "remove a service" verb, so
+    # it is scaled to zero: `docker compose up -d` starts no caddy container.
+    deploy:
+      replicas: 0
+    profiles: ["caddy-disabled"]
+
+  app:
+    networks:
+      - default
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK in .env}"
+      traefik.http.routers.burapay-api.rule: >-
+        Host(`${DOMAIN:?set DOMAIN in .env}`) &&
+        (PathPrefix(`/api`) || Path(`/health`) || Path(`/healthz`))
+      traefik.http.routers.burapay-api.entrypoints: "${TRAEFIK_ENTRYPOINT:?set TRAEFIK_ENTRYPOINT in .env}"
+      traefik.http.routers.burapay-api.tls: "true"
+      traefik.http.routers.burapay-api.tls.certresolver: "${TRAEFIK_CERT_RESOLVER:?set TRAEFIK_CERT_RESOLVER in .env}"
+      # Higher than the frontend's catch-all, so /api is not swallowed by it.
+      traefik.http.routers.burapay-api.priority: "100"
+      traefik.http.services.burapay-api.loadbalancer.server.port: "8000"
+
+  frontend:
+    networks:
+      - default
+      - traefik
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: "${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK in .env}"
+      traefik.http.routers.burapay-web.rule: "Host(`${DOMAIN:?set DOMAIN in .env}`)"
+      traefik.http.routers.burapay-web.entrypoints: "${TRAEFIK_ENTRYPOINT:?set TRAEFIK_ENTRYPOINT in .env}"
+      traefik.http.routers.burapay-web.tls: "true"
+      traefik.http.routers.burapay-web.tls.certresolver: "${TRAEFIK_CERT_RESOLVER:?set TRAEFIK_CERT_RESOLVER in .env}"
+      traefik.http.routers.burapay-web.priority: "1"
+      traefik.http.services.burapay-web.loadbalancer.server.port: "8080"
+
+  # db, redis and worker stay off the Traefik network deliberately: nothing
+  # outside the compose stack should be able to reach them.
+
+networks:
+  traefik:
+    external: true
+    name: "${TRAEFIK_NETWORK:?set TRAEFIK_NETWORK in .env}"

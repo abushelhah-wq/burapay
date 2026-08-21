@@ -1,0 +1,29 @@
+# Static file server for the built frontend, inside the frontend container.
+#
+# This is NOT the public reverse proxy -- that is the `caddy` service (or
+# Traefik, with the override). This one only serves files on the internal
+# network, which is why it listens on plain HTTP and terminates no TLS.
+
+:8080 {
+	root * /srv
+	encode zstd gzip
+
+	# Single-page app: unknown paths render index.html so a deep link like
+	# /transactions/42 works on a hard refresh, not just on client-side
+	# navigation.
+	try_files {path} /index.html
+	file_server
+
+	header {
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# Hashed asset filenames are immutable; index.html must never be cached, or
+	# a deploy leaves browsers pinned to the previous bundle.
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+	@index path / /index.html
+	header @index Cache-Control "no-cache"
+}

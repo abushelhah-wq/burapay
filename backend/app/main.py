@@ -27,7 +27,10 @@ from app.gateways.errors import (
     UnsupportedOperationError,
 )
 from app.logging_setup import configure_logging, get_logger
-from app.routers import analytics, auth, gateways, health, payments, settings as settings_router
+from app.routers import (
+    analytics, auth, benchmark, gateways, health, payments,
+    settings as settings_router,
+)
 from app.routers import transactions as transactions_router
 from app.routers import webhooks
 from app.security.crypto import is_configured as encryption_configured
@@ -129,6 +132,7 @@ def create_app() -> FastAPI:
     app.include_router(payments.router)
     app.include_router(transactions_router.router)
     app.include_router(analytics.router)
+    app.include_router(benchmark.router)
     app.include_router(settings_router.router)
     app.include_router(webhooks.router)
 

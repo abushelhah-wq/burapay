@@ -1,0 +1,176 @@
+# BuraPay production stack.
+#
+#   git pull
+#   docker compose build
+#   docker compose up -d
+#
+# Migrations run automatically when the api container starts, so there is no
+# manual database step. (If you prefer to run them yourself:
+# `docker compose exec app alembic upgrade head`.)
+#
+# ---------------------------------------------------------------------------
+# CHANGES FROM THE PREVIOUS RELEASE -- called out rather than made silently
+# ---------------------------------------------------------------------------
+# 1. This file moved from deploy/docker-compose.yml to the repository root.
+#    Required: the deploy sequence above uses `docker compose` with no -f, which
+#    only finds a compose file in the working directory.
+# 2. Service names `app` and `caddy` are unchanged, and so are the `caddy-data`
+#    and `caddy-config` volumes -- your existing Let's Encrypt certificates are
+#    in caddy-data and are preserved across this upgrade.
+# 3. New services: `db` (Postgres), `redis`, `worker`, `frontend`. All are
+#    containers; none needs anything installed on the host beyond Docker.
+# 4. The `app-data` volume is gone. The previous release kept a SQLite file in
+#    it; all state is now in Postgres. The old volume is left in place rather
+#    than removed here -- delete it yourself once you have confirmed you do not
+#    want the old results.db.
+#
+# For a host that already runs Traefik, add the override:
+#   docker compose -f docker-compose.yml -f docker-compose.traefik-network.yml up -d
+# See README "Deploying behind Traefik" and run scripts/inspect-traefik.sh on
+# the VPS first -- the TRAEFIK_* values must come from that script's output.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-burapay}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      POSTGRES_DB: "${POSTGRES_DB:-burapay}"
+      # Deterministic collation, so ordering does not depend on the host locale.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      # The api container waits for this, so a cold `up -d` does not race the
+      # database and fail its migrations on first boot.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-burapay} -d ${POSTGRES_DB:-burapay}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # No ports: mapping. Postgres is reachable only from the compose network.
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-burapay}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      POSTGRES_DB: "${POSTGRES_DB:-burapay}"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: "redis://redis:6379/0"
+
+      APP_SECRET_KEY: "${APP_SECRET_KEY:?set APP_SECRET_KEY in .env}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}"
+      BOOTSTRAP_ADMIN_EMAIL: "${BOOTSTRAP_ADMIN_EMAIL:-}"
+      BOOTSTRAP_ADMIN_PASSWORD: "${BOOTSTRAP_ADMIN_PASSWORD:-}"
+
+      # Every gateway-facing return and callback URL is built from this. It is
+      # the only place a domain appears anywhere in the system.
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://${DOMAIN:?set DOMAIN or PUBLIC_BASE_URL in .env}}"
+      CORS_ORIGINS: "${CORS_ORIGINS:-}"
+      DOMAIN: "${DOMAIN:-}"
+
+      ALLOW_PRODUCTION_GATEWAYS: "${ALLOW_PRODUCTION_GATEWAYS:-false}"
+      ALLOW_DIRECT_CARD_ENTRY: "${ALLOW_DIRECT_CARD_ENTRY:-0}"
+      BENCHMARK_MIN_INTERVAL_SECONDS: "${BENCHMARK_MIN_INTERVAL_SECONDS:-60}"
+      BENCHMARK_MAX_TRANSACTIONS_PER_RUN: "${BENCHMARK_MAX_TRANSACTIONS_PER_RUN:-50}"
+      HTTP_TIMEOUT_SECONDS: "${HTTP_TIMEOUT_SECONDS:-30}"
+
+      MEASUREMENT_LOCATION: "${MEASUREMENT_LOCATION:-}"
+      TEST_CURRENCY: "${TEST_CURRENCY:-SAR}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+
+      # Seeded into the encrypted credential store on first start, then never
+      # read again -- the Settings page is authoritative afterwards.
+      GEIDEA_PUBLIC_KEY: "${GEIDEA_PUBLIC_KEY:-}"
+      GEIDEA_API_PASSWORD: "${GEIDEA_API_PASSWORD:-}"
+      GEIDEA_REGION: "${GEIDEA_REGION:-ksa}"
+      GEIDEA_API_BASE: "${GEIDEA_API_BASE:-}"
+    expose:
+      - "8000"
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["worker"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      app:
+        condition: service_started
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-burapay}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+      POSTGRES_DB: "${POSTGRES_DB:-burapay}"
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: "redis://redis:6379/0"
+      APP_SECRET_KEY: "${APP_SECRET_KEY:?set APP_SECRET_KEY in .env}"
+      ENCRYPTION_KEY: "${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://${DOMAIN:?set DOMAIN or PUBLIC_BASE_URL in .env}}"
+      ALLOW_PRODUCTION_GATEWAYS: "${ALLOW_PRODUCTION_GATEWAYS:-false}"
+      ALLOW_DIRECT_CARD_ENTRY: "${ALLOW_DIRECT_CARD_ENTRY:-0}"
+      BENCHMARK_MIN_INTERVAL_SECONDS: "${BENCHMARK_MIN_INTERVAL_SECONDS:-60}"
+      BENCHMARK_MAX_TRANSACTIONS_PER_RUN: "${BENCHMARK_MAX_TRANSACTIONS_PER_RUN:-50}"
+      HTTP_TIMEOUT_SECONDS: "${HTTP_TIMEOUT_SECONDS:-30}"
+      MEASUREMENT_LOCATION: "${MEASUREMENT_LOCATION:-}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8080"
+    # Holds no credentials and reaches nothing but the browser. The bundle is
+    # built at image build time, so this container serves static files only.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: "${DOMAIN:?set DOMAIN in .env}"
+      ACME_EMAIL: "${ACME_EMAIL:?set ACME_EMAIL in .env}"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data      # certificates live here -- keep this volume
+      - caddy-config:/config
+
+volumes:
+  db-data:
+  redis-data:
+  caddy-data:
+  caddy-config:

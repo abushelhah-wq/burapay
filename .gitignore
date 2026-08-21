@@ -1,6 +1,6 @@
 # Credentials - never commit these
-gateway-benchmark/scripts/.env
 .env
+gateway-benchmark/scripts/.env
 
 # Python
 __pycache__/
@@ -8,9 +8,20 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+frontend/dist/
+*.tsbuildinfo
 
 # Measured output. The workbook is committed (it carries the documentation-based
 # comparison); raw per-run CSV/JSON are yours to keep or share, not repo content.
+results/benchmark_*.json
+results/summary_*.csv
+results/per_call_*.csv
+results/latest*.json
+results/latest*.csv
 gateway-benchmark/results/benchmark_*.json
 gateway-benchmark/results/summary_*.csv
 gateway-benchmark/results/per_call_*.csv
@@ -20,7 +31,7 @@ gateway-benchmark/results/latest*.csv
 # OS noise
 .DS_Store
 
-# Web app
+# Local TLS material and the old SQLite database
 certs/
 data/
 *.db

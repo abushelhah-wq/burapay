@@ -1,216 +1,439 @@
-# busrapay — payment gateway response-time benchmark
+# BuraPay — payment gateway performance benchmarking
 
-A web application that measures how many API calls each payment gateway needs and
-how long each one takes. Pick a gateway and a flow, pay with a sandbox test card,
-and every merchant-server call is timed and recorded.
+Measures how many API round trips each payment gateway needs to complete the
+same operation, and how long each one takes, against real sandbox APIs. Every
+claim it makes is backed by stored rows: a transaction's full ordered list of
+HTTP calls is in the database, and the dashboard's figures are computed from
+those rows at request time.
 
-Compares **Geidea** (the baseline) against **Adyen, Stripe, Checkout.com, HyperPay
-and Moyasar** across six flows: hosted checkout, direct server-to-server API,
-capture, refund, void, and MIT/recurring.
+Geidea is the reference implementation. Adding a gateway means writing one
+adapter module and adding one line to a registry.
 
 ---
 
-## Quickstart
+## Read this first: documentation access
 
-```bash
-python3 -m pip install -r requirements.txt --break-system-packages
-cp .env.example .env                  # fill in at least one gateway's sandbox keys
+`docs.geidea.net` was **unreachable** when this was built — the deployment
+environment's egress proxy refuses the domain (403 on CONNECT for
+`docs.geidea.net`, `geidea.net`, `www.geidea.net` and `api.merchant.geidea.net`).
 
-./scripts/make_cert.sh localhost      # self-signed cert for local HTTPS
-SSL_CERTFILE=certs/cert.pem SSL_KEYFILE=certs/key.pem \
-  PUBLIC_BASE_URL=https://localhost:8443 python serve.py
-```
+The build rules require every Geidea endpoint's request and response shape to be
+read from the live documentation before it is implemented, and forbid inventing
+a field name, status code or error format. Since no page could be fetched, the
+adapter does not pretend otherwise:
 
-Then open <https://localhost:8443/checkout> and click through the browser's
-self-signed-certificate warning.
+- Every endpoint carries an explicit **provenance** in
+  [`backend/app/gateways/geidea/endpoints.py`](backend/app/gateways/geidea/endpoints.py).
+- Operations whose shape rests on **nothing** — standalone tokenization, CIT,
+  MIT, and callback signature verification — are **not implemented**. They raise
+  a typed `DocumentationRequiredError` naming the exact page needed, are absent
+  from the adapter's capability set, and are therefore hidden in the UI rather
+  than offered as buttons that cannot work.
+- Operations implemented from this repository's own earlier documentation study
+  (`docs/02_api_flow_comparison.md`, which cites the pages it came from) are
+  marked `doc_derived_unverified` and shown as such in the UI's **Documentation
+  status** panel.
+- The **signature construction** is the one inference that is shipped. Its field
+  order and timestamp format could not be confirmed, and the previous release
+  already listed both as open questions. It is shipped because a wrong signature
+  produces a clean rejection that gets logged — it cannot move money to the wrong
+  place — and because both are overridable from gateway config without a code
+  change. Everything that could move the *wrong amount* is blocked instead.
 
-For a real deployment with a real certificate, see [Deploying](#deploying).
+**To clear the gaps:** fetch each page as markdown (`<url>.md` returns clean
+markdown), then update the matching `Endpoint` in `endpoints.py` — set
+`provenance=Provenance.DOC_VERIFIED`, fill in `verified_fields` and
+`verified_on`. The adapter needs no other change; `DocumentationRequiredError`
+stops being raised as soon as an operation's endpoints are no longer
+`UNDOCUMENTED`. The pages needed are listed in the UI and in `ALL_ENDPOINTS`.
 
-## Why HTTPS is not optional here
+Consequently, **no flow has been run against the Geidea sandbox.** The sandbox
+host is blocked from this environment too, and no credentials were available.
+What *is* verified is described under [Tests](#tests).
 
-This is not a security checkbox — three things break without it:
+---
 
-1. **Hosted checkout hands the gateway a `return_url` and a `callback_url`.**
-   Sandboxes reject non-HTTPS values for both. The app refuses to start a hosted
-   flow when `PUBLIC_BASE_URL` is not `https://`, and says so, rather than letting
-   the gateway return an opaque rejection you have to decode.
-2. **Webhooks need a publicly reachable TLS endpoint.** A gateway cannot deliver to
-   a host whose certificate it cannot verify — which rules out self-signed certs for
-   anything beyond local UI work.
-3. **Browsers will not carry a secure-context redirect back to a plaintext origin**,
-   so the return leg silently fails.
-
-The server-side flows (direct API, capture, refund, void, MIT) never redirect a
-browser, so they work regardless. Only hosted checkout is gated.
-
-A self-signed certificate is enough to click around the UI locally. It is **not**
-enough for hosted checkout against a real sandbox — for that you need either a real
-certificate or a tunnel (ngrok, cloudflared) that terminates TLS with a trusted one.
-
-## What gets measured
-
-**Only outbound merchant-server calls are counted.** Webhooks are acknowledged at
-`/webhook/{gateway}` but never counted — the merchant neither initiates them nor
-controls their delivery, so they are not a round trip it can time or retry.
-
-**Timed vs. setup calls.** Refunding something requires a payment to refund;
-charging a stored card requires a stored card. Those setup calls are issued but
-marked *setup* and excluded from both the call count and the total, because a real
-merchant would already have made them. The result table shows them greyed out, so
-you can see exactly what was and was not counted.
-
-**Hosted checkout is measured across both legs.** The clock covers the session
-create and the server-side confirmation. It deliberately excludes the customer's
-time on the gateway's payment page — the merchant does not control how fast someone
-types a card number.
-
-**Percentiles are nearest-rank, never interpolated.** Every figure on the results
-page is a latency that actually occurred. With a handful of runs a p95 is not yet
-meaningful; use `scripts/bench.py` for a real distribution.
-
-**Where you run it matters more than anything else it measures.** Run it from the
-same infrastructure your merchants transact from. Set `MEASUREMENT_LOCATION` in
-`.env` so results record where they came from.
-
-## The question this exists to answer
-
-From the documentation research in [`docs/02_api_flow_comparison.md`](docs/02_api_flow_comparison.md):
-
-> **Geidea's Direct API is the only one of the six with a fixed 4-call sequence**
-> (session → initiate authentication → authenticate payer → pay), regardless of
-> whether a 3DS challenge actually occurs. Every competitor documents a 1–2 call
-> frictionless minimum, with the extra call conditional on a real challenge.
-
-Whether that fixed sequence survives contact with a sandbox is the point of the
-exercise. `app/adapters/geidea_adapter.py` deliberately does **not** hard-code four
-calls: it reads the initiate response for a frictionless marker and completes in
-three when it finds one. `GEIDEA_FORCE_FULL_3DS=1` forces the documented four.
-
-The result panel shows the measured count next to the documented one, so a
-divergence is visible immediately rather than needing to be dug for.
-
-## Layout
+## Architecture
 
 ```
-app/
-├── main.py                    FastAPI routes, HTTPS enforcement, HSTS
-├── config.py                  settings; validates PUBLIC_BASE_URL is https
-├── timing.py                  MeasuredSession — times every call, splits timed/prep
-├── storage.py                 SQLite: one row per attempt, one per HTTP call
-├── adapters/
-│   ├── base.py                the adapter contract
-│   ├── geidea_adapter.py      baseline — both flows, HMAC signing, region hosts
-│   ├── stripe_adapter.py      the reference pattern
-│   ├── adyen_adapter.py, checkout_adapter.py, hyperpay_adapter.py, moyasar_adapter.py
-│   └── __init__.py            registry
-├── templates/                 checkout, results, gateway handoff
-└── static/style.css
-scripts/
-├── bench.py                   batch runner — N repetitions, real distributions
-├── build_workbook.py          Excel export
-├── reference_data.py          the documentation research, as data
-└── make_cert.sh               self-signed cert for local HTTPS
-deploy/                        docker-compose + Caddyfile (automatic real certs)
-docs/                          sandbox signup guide, API flow comparison, Stripe deep dive
-tests/                         33 tests: mock gateway, all six adapters, HTTP layer
+                        ┌──────────────────────────────────────┐
+   browser ─── 443 ───▶ │  caddy   (or Traefik, with override) │
+                        │  TLS, routing                        │
+                        └───────┬───────────────────┬──────────┘
+                    /api, /health│                   │ everything else
+                                 ▼                   ▼
+                     ┌────────────────────┐  ┌──────────────────┐
+                     │  app  (FastAPI)    │  │ frontend (React) │
+                     │  async, JSON only  │  │ static bundle    │
+                     └──┬────────┬────────┘  └──────────────────┘
+                        │        │
+              ┌─────────┘        └──────────┐
+              ▼                             ▼
+      ┌───────────────┐            ┌─────────────────┐
+      │ db (Postgres) │            │ redis  ◀── worker (RQ)
+      │  transactions │            │ queued benchmark runs
+      │  api_call_logs│            └─────────────────┘
+      │  gateway_credentials (Fernet ciphertext)
+      └───────────────┘
+                        ▲
+                        │ every outbound call, without exception
+              ┌─────────┴───────────────────────────────┐
+              │  app/gateways/http_client.py            │
+              │  authenticate → log request → send with │
+              │  timeout → log response/failure → return│
+              └─────────┬───────────────────────────────┘
+                        ▼
+                  Geidea sandbox
 ```
 
-`app/adapters/` is the single implementation of every gateway's call sequence. The
-web UI and `scripts/bench.py` both drive it, so the two can never disagree about
-what a flow is.
+### The rules the structure exists to enforce
 
-## Two ways to run a measurement
+**One HTTP chokepoint.** `app/gateways/http_client.py` is the only module
+permitted to import `httpx`. It authenticates the request, writes the
+`api_call_logs` row *before* sending, sends with an explicit timeout, and
+completes the row after the response, the timeout, or the failure. There is no
+path through it that sends a request and leaves no row.
 
-**The web UI** (`/checkout`) runs one attempt per click. That is the right shape for
-"does this work, and how long did it take" — and the only way to measure hosted
-checkout, whose second leg needs a human on the gateway's page.
+The log row commits on its own connection, so the audit trail survives the
+business transaction rolling back. If they shared a session, a handler that
+raised would roll back its own logs — and a failed operation, the one worth
+investigating, would be the one case with no evidence.
 
-**`scripts/bench.py`** repeats each flow N times and reports min/mean/median/p95/max.
-One sample is an anecdote; a p95 needs a few dozen.
+`backend/tests/test_security_invariants.py` scans the source tree and fails if
+any other module imports an HTTP library.
 
-```bash
-python scripts/bench.py --list                    # configuration status
-python scripts/bench.py --gateway geidea stripe   # a subset
-python scripts/bench.py --flow direct_api         # a subset of flows
-python scripts/bench.py --runs 5 --warmups 1      # quick shakedown
-python scripts/bench.py                           # 30 runs, every configured gateway
+**Money is integer minor units, end to end.** No `Numeric` column, no `float`,
+no decimal amount in any request model. `app/money.py` carries an explicit ISO
+4217 exponent table and *raises* on an unknown currency rather than assuming two
+decimals — that assumption charges a three-decimal currency (KWD, BHD, OMR, JOD,
+TND) a thousand times wrong. Conversion to a display string happens once, at the
+presentation edge.
+
+**Idempotency is a database constraint.** `UNIQUE (gateway_id,
+idempotency_key)`. The service layer's check-then-insert is an optimisation on
+top of it; the constraint is the guarantee, and the code handles the resulting
+`IntegrityError` by returning the winning row. A test races three concurrent
+requests on one key and asserts exactly one transaction exists.
+
+**Card data never reaches storage.** PAN and CVV are destroyed by the shared
+client before anything is written. Redaction is key-based *and* value-based: a
+Luhn-valid, PAN-shaped value is redacted even under an unexpected key, and PANs
+embedded in free-text error bodies are caught too. Only what is permitted is
+kept — brand, last four, expiry month and year, and the gateway's token
+reference. A test runs a real sale with a real PAN and then greps every column
+of every table for it.
+
+**`request_count` is derived, never asserted.** It is `len(result.calls)` — the
+calls the shared client actually made. It is also incremented live as each call
+completes, which is what keeps the number honest for an operation that crashed
+halfway.
+
+**`PUBLIC_BASE_URL` is the only source of a domain.** Every return and callback
+URL is built from it in the service layer, so an adapter is never in a position
+to hardcode one. A test greps the source tree to confirm no deployment domain
+appears anywhere.
+
+### Layout
+
+```
+backend/
+├── app/
+│   ├── config.py            settings; the safety gates are read here
+│   ├── money.py             integer minor units + ISO 4217 exponents
+│   ├── redaction.py         PAN/CVV destruction, secret masking
+│   ├── models.py            the §2 schema, plus credentials/users/runs
+│   ├── gateways/
+│   │   ├── http_client.py   THE shared client — the only httpx importer
+│   │   ├── base.py          GatewayAdapter, Capability, GatewayContext
+│   │   ├── errors.py        typed failures, incl. DocumentationRequiredError
+│   │   ├── registry.py      code -> adapter class (the one line a gateway adds)
+│   │   └── geidea/          adapter.py, endpoints.py (provenance), signing.py
+│   ├── security/            crypto, CredentialStore, auth, gates
+│   ├── services/            execution, webhooks, analytics, benchmark, bootstrap
+│   ├── routers/             the REST API
+│   └── workers/             RQ queue + the benchmark job
+├── alembic/versions/        migrations, run automatically on container start
+└── tests/                   65 tests, real Postgres + a real mock gateway
+frontend/                    React + Vite, its own container, REST only
+deploy/Caddyfile             public reverse proxy (the default)
+docker-compose.yml           the whole stack
+docker-compose.traefik-network.yml   override for a host already running Traefik
+scripts/inspect-traefik.sh   run this ON THE VPS before using the override
+docs/                        the documentation research behind endpoints.py
+legacy/                      the previous release — see legacy/README.md
 ```
 
-It excludes hosted checkout for the reason above. Results land in `results/` as JSON
-and CSV; `python scripts/build_workbook.py` folds them into the Excel workbook.
+---
 
 ## Deploying
 
-`deploy/docker-compose.yml` runs the app behind Caddy, which obtains and renews a
-real Let's Encrypt certificate automatically — no cert paths to configure, no
-renewal cron to forget.
+The deploy sequence, unchanged:
 
 ```bash
-# 1. Point your domain's A/AAAA record at the host
-# 2. Set DOMAIN, ACME_EMAIL and gateway credentials in .env
-docker compose -f deploy/docker-compose.yml up -d
+git pull
+docker compose build
+docker compose up -d
 ```
 
-Ports 80 and 443 must be reachable from the internet: Caddy needs 80 for the ACME
-challenge, and the gateways need 443 to deliver webhooks and return redirects.
+Migrations run automatically when the `app` container starts, so there is no
+manual database step. To run them yourself instead:
 
-The app container publishes no ports of its own — it is reachable only through
-Caddy, so there is no plaintext path to it. It runs unprivileged and owns only its
-data volume.
+```bash
+docker compose exec app alembic upgrade head
+```
 
-Behind any other reverse proxy, set `BEHIND_PROXY=1` so the app trusts
-`X-Forwarded-Proto`. That header is client-settable, so it is ignored unless you
-opt in — otherwise a caller could spoof the scheme past the HTTPS check.
+### First run
 
-## Credentials
+```bash
+cp .env.example .env
+# Generate the two required keys:
+python3 -c "import secrets; print('APP_SECRET_KEY=' + secrets.token_urlsafe(48))"
+python3 -c "from cryptography.fernet import Fernet; print('ENCRYPTION_KEY=' + Fernet.generate_key().decode())"
+# Then set POSTGRES_PASSWORD, DOMAIN, ACME_EMAIL, PUBLIC_BASE_URL and
+# BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD.
+docker compose build && docker compose up -d
+```
 
-Every gateway is optional. One with no credentials shows as *not configured* in the
-UI and cannot be selected, rather than failing when you press Pay.
+The bootstrap admin is created only while the `users` table is empty. After that
+the variables are inert — changing the password there does nothing, by design.
 
-[`docs/01_sandbox_signup_guide.md`](docs/01_sandbox_signup_guide.md) covers getting
-sandbox keys for each. Stripe and Moyasar are self-serve with keys visible
-immediately; Geidea and HyperPay are not self-serve and need a human at the vendor,
-so start those first.
+**Back up `ENCRYPTION_KEY`.** Losing it makes every stored gateway credential
+unreadable; they would have to be re-entered.
 
-`.env` is gitignored. Use sandbox keys only. No request body is ever written to the
-database — only response excerpts on failures — so card data submitted to a gateway
-never lands in storage or logs.
+### What changed from the previous release
 
-## Known unknowns
+Called out rather than done silently:
 
-Carried from the documentation research, and worth knowing before you debug:
+| Change | Why |
+|---|---|
+| `docker-compose.yml` moved from `deploy/` to the repository root | The required sequence is `docker compose build && docker compose up -d` with no `-f`, which only finds a compose file in the working directory. |
+| New services `db`, `redis`, `worker`, `frontend` | Postgres and a real queue are requirements; the frontend must be its own service. All are containers — nothing new is installed on the host. |
+| `app-data` volume no longer used | It held the SQLite file. All state is in Postgres now. The volume is left in place rather than deleted; remove it yourself once you are sure you do not want the old `results.db`. |
+| Service names `app` and `caddy`, and the `caddy-data` / `caddy-config` volumes | **Unchanged.** Your existing Let's Encrypt certificates are in `caddy-data` and survive the upgrade. |
 
-- **Geidea's signature format is inferred.** The documented concatenation is
-  implemented (`publicKey + amount + currency + reference + timestamp`, HMAC-SHA256
-  keyed on the API password, base64), but it could not be verified against a worked
-  example. If the first call is rejected for a bad signature, that field order — or
-  `GEIDEA_TIMESTAMP_FORMAT` — is the thing to change, not the adapter.
-- **Geidea's hosted redirect field name varies.** The adapter checks several known
-  spellings and, failing all of them, reports which fields the session response
-  actually carried rather than throwing a `KeyError`.
-- **HyperPay's back-office URL shape is unverified.** Both dedicated tutorial pages
-  404'd during research. The default posts to `/v1/payments/{id}`; set
-  `HYPERPAY_BACKOFFICE_PATH=nested` for Peach Payments' shape on the same engine.
-- **Adyen's Sessions flow has no documented status endpoint.** Confirmation is
-  webhook-only, so `confirm_hosted` makes no call and says so rather than inventing
-  a GET that would misrepresent the flow.
-- **Checkout.com's capture/refund/void return `202 Accepted`.** Those timings are
-  time-to-ack, not time-to-settled.
+### Deploying behind Traefik
 
-The full list of 22 open questions is in
-[`docs/02_api_flow_comparison.md`](docs/02_api_flow_comparison.md) and in the
-workbook's Data Gaps tab.
+The default stack runs its own Caddy. For a host that already runs Traefik,
+**first run the inspection script on that host**:
+
+```bash
+./scripts/inspect-traefik.sh
+```
+
+It reports the entrypoint, certificate resolver and network that host actually
+uses, and prints the labels existing proxied apps use. Copy those values into
+`.env`:
+
+```
+TRAEFIK_NETWORK=<the shared network name>
+TRAEFIK_ENTRYPOINT=<the https entrypoint, often 'websecure'>
+TRAEFIK_CERT_RESOLVER=<the resolver, often 'letsencrypt'>
+```
+
+Then deploy with the override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.traefik-network.yml up -d
+```
+
+Do not guess these values. An entrypoint or resolver name that does not exist
+produces a router Traefik silently ignores — which looks exactly like the
+application being down.
+
+The override adds these labels (routing identical to the Caddyfile: `/api` and
+`/health` to the backend, everything else to the frontend; the API router
+carries the higher priority so it is not swallowed by the catch-all):
+
+```yaml
+app:
+  traefik.enable: "true"
+  traefik.docker.network: "${TRAEFIK_NETWORK}"
+  traefik.http.routers.burapay-api.rule: Host(`${DOMAIN}`) && (PathPrefix(`/api`) || Path(`/health`) || Path(`/healthz`))
+  traefik.http.routers.burapay-api.entrypoints: "${TRAEFIK_ENTRYPOINT}"
+  traefik.http.routers.burapay-api.tls.certresolver: "${TRAEFIK_CERT_RESOLVER}"
+  traefik.http.routers.burapay-api.priority: "100"
+  traefik.http.services.burapay-api.loadbalancer.server.port: "8000"
+
+frontend:
+  traefik.http.routers.burapay-web.rule: Host(`${DOMAIN}`)
+  traefik.http.routers.burapay-web.priority: "1"
+  traefik.http.services.burapay-web.loadbalancer.server.port: "8080"
+```
+
+It also scales the bundled `caddy` service to zero, since Traefik owns 80/443
+and two things cannot bind the same ports. `db`, `redis` and `worker` stay off
+the Traefik network deliberately — nothing outside the stack should reach them.
+
+---
+
+## Adding a gateway adapter
+
+Two steps. Nothing else in the codebase changes.
+
+**1. Write `backend/app/gateways/<name>/adapter.py`:**
+
+```python
+from app.gateways.base import Capability, GatewayAdapter
+from app.gateways.results import PaymentResult
+from app.models import IntegrationTypeCode, TransactionStatus
+
+class AcmeAdapter(GatewayAdapter):
+    code = "acme"
+    display_name = "Acme Payments"
+    required_credentials = ("api_key",)
+
+    # Declare only what you implement. Anything absent raises
+    # UnsupportedOperationError and is hidden in the UI rather than offered
+    # as a button that cannot work.
+    capabilities = frozenset({
+        Capability.DIRECT_API_SALE,
+        Capability.REFUND,
+        Capability.QUERY_ORDER,
+    })
+    supported_integration_types = (IntegrationTypeCode.DIRECT_API,)
+
+    # §8 requires the doc page used to be linked from the code.
+    doc_urls = {"direct_api_sale": "https://docs.acme.example/payments"}
+
+    def auth(self):
+        creds = self.require_credentials("api_key")
+        return BearerAuth(creds["api_key"])          # your GatewayAuth
+
+    async def direct_api_sale(self, order, card):
+        self.guard_production()                       # ALLOW_PRODUCTION_GATEWAYS
+        async with self.client() as client:           # THE shared client
+            call = await client.call(
+                step_name="pay", method="POST",
+                url=f"{self.base_url}/payments",
+                json_body={...},
+                raise_on_status=False,
+            )
+            return PaymentResult(
+                calls=client.calls,                   # request_count derives from this
+                status=TransactionStatus.SUCCESS,
+                gateway_order_id=...,
+                card=card.safe_details(),
+            )
+```
+
+Rules the base class and the client enforce for you: credentials resolve at call
+time through `CredentialStore` (never `os.environ`), the production gate is one
+`guard_production()` call, every request is logged and redacted, and
+`request_count` comes from `len(calls)` so it cannot drift.
+
+Build URLs only from `order.return_url` / `order.callback_url`, which the
+service layer already resolved from `PUBLIC_BASE_URL`.
+
+**2. Register it:**
+
+```python
+# backend/app/gateways/registry.py
+ADAPTERS = {
+    GeideaAdapter.code: GeideaAdapter,
+    AcmeAdapter.code: AcmeAdapter,     # the one line
+}
+```
+
+The gateway row, its integration types, and the Settings page fields appear
+automatically on next start. If a request shape cannot be verified against the
+gateway's documentation, raise `DocumentationRequiredError` with the page URL
+instead of guessing — that is what puts it in the UI's Documentation status
+panel rather than into a live payment request.
+
+Five more gateways (Stripe, Adyen, Checkout.com, HyperPay, Moyasar) have working
+synchronous implementations in [`legacy/app/adapters/`](legacy/README.md) that
+have not yet been ported to this interface.
+
+---
 
 ## Tests
 
 ```bash
-python3 -m pip install -r requirements-dev.txt --break-system-packages
-python3 -m unittest discover -s tests -v
+cd backend
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+
+# Postgres must be reachable. Create the test database once:
+createdb burapay_test
+
+DATABASE_URL=postgresql+asyncpg://burapay:burapay@127.0.0.1:5432/burapay_test \
+  .venv/bin/python -m pytest -q
 ```
 
-33 tests. `tests/mock_gateway.py` stands in for all six gateways, so every adapter
-flow — both legs of hosted checkout included — runs end to end with no credentials.
-The tests assert the exact timed-call count per gateway and flow, so a changed
-sequence fails loudly. They verify request construction, response parsing, call
-sequencing, the timed/prep split, and the HTTPS policy. They do **not** verify that
-a real gateway accepts these requests; only a live run does that.
+**65 tests.** Two choices about fidelity are deliberate:
+
+- They run against **real Postgres**, not SQLite. The idempotency guarantee is a
+  UNIQUE constraint and the audit log depends on a second connection seeing
+  committed rows — neither is meaningfully exercised by SQLite, and testing a
+  different engine from the deployed one would make the results worth less than
+  they look.
+- The mock gateway is a **real HTTP server on a real port**, not a patched
+  transport. The shared client builds its own `httpx.AsyncClient`, so injecting
+  a transport would bypass the code under test: connection handling, status
+  codes, and actual timeout behaviour.
+
+Every flow test asserts **three** things — the final status, the
+`request_count`, *and* the exact ordered `api_call_logs` sequence. Asserting
+status alone would let a regression that doubles the number of round trips pass
+silently, which is the worst kind of regression this codebase can have.
+
+Covered: direct sale (4 calls), frictionless sale (3), decline vs. error,
+pre-auth, capture (full, partial, multiple partial, over-capture refused),
+refund (full, partial, refused on an uncaptured auth), void (and refused after
+capture), timeout with and without successful reconciliation, network failure,
+non-2xx, unparseable body, concurrent idempotency, both safety gates, benchmark
+limits, credential encryption at rest, the no-direct-`httpx` and
+no-hardcoded-domain source rules, dashboard arithmetic, and the HTTP layer.
+
+**What the tests do not prove:** that Geidea accepts these requests. The mock
+was written from the same material the adapter was, so agreement between them
+says nothing about the real API. Only a live sandbox run settles that, and it
+has not been possible here — see [the top of this README](#read-this-first-documentation-access).
+
+### Live sandbox verification, when you can run it
+
+On a host that can reach `docs.geidea.net` and the Geidea sandbox:
+
+1. Fetch the doc pages and update `endpoints.py` provenance.
+2. Enter sandbox credentials on the Settings page and press **Test connection** —
+   one harmless read-only call that creates nothing in your sandbox.
+3. Run one of each flow from **New transaction** and check the call trail on the
+   transaction detail page against Geidea's merchant dashboard.
+4. The first thing to suspect on a signature rejection is the signature field
+   order or timestamp format — both are gateway config, editable without a
+   redeploy.
+
+---
+
+## What gets measured
+
+**Round trips are the headline.** `request_count` per operation is what the
+benchmark compares: a Direct API sale that needs four calls costs four network
+latencies, and that is a structural property of the gateway rather than of the
+network.
+
+**A decline is not an error.** `FAILED` means the gateway completed the round
+trip and said no; `ERROR` and `TIMEOUT` mean it did not answer. The dashboard
+counts them separately, because a gateway that declines quickly is not the same
+as one that is broken, and averaging them hides exactly the difference worth
+measuring.
+
+**Percentiles are nearest-rank, never interpolated.** Every figure shown is a
+latency that actually occurred. Sample sizes are shown next to them, and cells
+with fewer than 20 timed runs are flagged — a p95 over four samples is not a p95.
+
+**Pending transactions are excluded from latency and from the success rate.** A
+hosted-checkout session that nobody has paid yet has not succeeded or failed;
+counting it either way would be wrong.
+
+**Where you run it matters more than anything it measures.** Set
+`MEASUREMENT_LOCATION` — the dashboard says so explicitly when it is unset.
+
+---
+
+## Health
+
+`GET /health` checks database connectivity and **nothing else**. It deliberately
+makes no gateway call: a probe running every 30 seconds against a sandbox would
+burn API quota and fill the merchant dashboard with traffic that looks real.
+Gateway reachability is checked on demand, by the Settings page's test-connection
+action, which a human triggers.

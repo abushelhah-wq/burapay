@@ -1,5 +1,11 @@
-# Caddy obtains and renews the certificate automatically. There is no certificate
-# path to configure and no renewal cron to forget.
+# Public reverse proxy.
+#
+# Caddy obtains and renews the certificate automatically -- no certificate path
+# to configure and no renewal cron to forget.
+#
+# Routing: /api and /health go to the backend, everything else to the frontend.
+# The two share an origin, which is why CORS_ORIGINS can stay empty in a normal
+# deployment: the browser never makes a cross-origin request.
 
 {
 	email {$ACME_EMAIL}
@@ -8,17 +14,28 @@
 {$DOMAIN} {
 	encode zstd gzip
 
-	# Caddy redirects http->https on its own, so the app's own redirect stays idle.
 	header {
 		Strict-Transport-Security "max-age=31536000; includeSubDomains"
 		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
 	}
 
-	reverse_proxy app:8000 {
-		header_up X-Forwarded-Proto {scheme}
-		header_up X-Real-IP {remote_host}
+	# The API. Gateways POST callbacks to /api/webhooks/{gateway} and send
+	# customers back to /api/payments/return/{gateway}, so both must reach the
+	# backend rather than the SPA.
+	@api path /api/* /health /healthz /docs /openapi.json
+	handle @api {
+		reverse_proxy app:8000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Everything else is the single-page app.
+	handle {
+		reverse_proxy frontend:8080
 	}
 
 	log {
