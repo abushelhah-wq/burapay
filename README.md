@@ -254,6 +254,43 @@ Called out rather than done silently:
 | `app-data` volume no longer used | It held the SQLite file. All state is in Postgres now. The volume is left in place rather than deleted; remove it yourself once you are sure you do not want the old `results.db`. |
 | Service names `app` and `caddy`, and the `caddy-data` / `caddy-config` volumes | **Unchanged.** Your existing Let's Encrypt certificates are in `caddy-data` and survive the upgrade. |
 
+### Troubleshooting
+
+**`container ... is not connected to the network <name>`** on `up`.
+
+Two Compose projects are fighting over one network. It happens when
+`BURAPAY_WEB_NETWORK` names a network another stack already owns — typically
+after copying a `.env` from a previous deployment directory. Compose will not
+adopt another project's network cleanly, and recreate leaves containers
+half-attached.
+
+```bash
+docker network inspect "$NAME" --format 'owner={{index .Labels "com.docker.compose.project"}}'
+docker network inspect "$NAME" --format '{{range .Containers}}{{.Name}} {{end}}'
+```
+
+If the owner is a different project, give this stack its own name
+(`BURAPAY_WEB_NETWORK=burapaynew_web`, the default) and bring it up clean:
+
+```bash
+docker compose down --remove-orphans
+docker compose up -d --build
+```
+
+`down` removes containers and networks but **not** named volumes, so the
+`db-data` volume and its contents survive.
+
+**Traefik returns its own `404 page not found`.** Traefik is holding the domain
+but no router matched. Either the containers carry no labels (check
+`docker inspect <container> | grep traefik`), or `TRAEFIK_ENTRYPOINT` /
+`TRAEFIK_CERT_RESOLVER` name things that do not exist on that Traefik — a
+wrong resolver name produces a router Traefik silently ignores, which looks
+identical to the app being down.
+
+**Two stacks claiming the same domain.** Router names are prefixed with
+`TRAEFIK_ROUTER_PREFIX` so two copies can coexist, but both would still match
+`Host(...)` and Traefik would pick between them unpredictably. Run one.
+
 ### Deploying behind Traefik
 
 The default stack runs its own Caddy. For a host that already runs Traefik,
