@@ -22,24 +22,39 @@ from app.models import (
 )
 from app.services import execution
 from app.services.benchmark import RunStatus, execute_run
+from app.workers.queue import unseal
 
 logger = get_logger(__name__)
 
 
-def run_benchmark(run_id: int, card: Optional[dict] = None) -> dict:
+def run_benchmark(run_id: int, sealed_card: Optional[str] = None) -> dict:
     """
     Execute a benchmark run. Entry point for the RQ worker.
 
-    ``card`` is passed in memory from the enqueueing request and is never
-    persisted by the queue beyond the job payload's lifetime. It exists only
-    because a Direct API benchmark needs a card to charge; runs that do not
-    need one pass ``None``.
+    ``sealed_card`` is Fernet ciphertext, not a dict. A Direct API benchmark
+    needs a card to charge, and a queued job is persisted by Redis -- so a
+    plaintext card in a job argument would be card data on disk, and would also
+    be printed into the worker log when RQ reprs the call. It is sealed by the
+    enqueueing request and opened here, in memory, for this job only (§0.8).
     """
     configure_logging()
+    return asyncio.run(_run_and_dispose(run_id, sealed_card))
+
+
+async def _run_and_dispose(run_id: int, sealed_card: Optional[str]) -> dict:
+    """
+    Run the job and dispose the engine *inside the same event loop*.
+
+    Disposing from a second ``asyncio.run`` would try to close connections that
+    belong to a loop that has already exited, which logs a page of alarming
+    tracebacks after a job that actually succeeded. Noisy teardown errors train
+    people to ignore the log.
+    """
+    card = unseal(sealed_card) if sealed_card else None
     try:
-        return asyncio.run(_run_benchmark(run_id, card))
+        return await _run_benchmark(run_id, card)
     finally:
-        asyncio.run(dispose_engine())
+        await dispose_engine()
 
 
 async def _run_benchmark(run_id: int, card: Optional[dict]) -> dict:

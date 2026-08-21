@@ -123,6 +123,14 @@ kept — brand, last four, expiry month and year, and the gateway's token
 reference. A test runs a real sale with a real PAN and then greps every column
 of every table for it.
 
+**Queued jobs carry no card data.** A benchmark run needs a card to charge, but
+a queued job is persisted by Redis and RQ writes a `repr` of the call into the
+worker log on every state change — so a plaintext card in a job argument would
+be card data both on disk and in the application log. The payload is sealed with
+the same `ENCRYPTION_KEY` used for stored credentials and opened only inside the
+worker. (Both leaks were real and are fixed; `test_queued_card_payload_is_sealed`
+is what keeps them fixed.)
+
 **`request_count` is derived, never asserted.** It is `len(result.calls)` — the
 calls the shared client actually made. It is also incremented live as each call
 completes, which is what keeps the number honest for an operation that crashed
@@ -359,7 +367,7 @@ DATABASE_URL=postgresql+asyncpg://burapay:burapay@127.0.0.1:5432/burapay_test \
   .venv/bin/python -m pytest -q
 ```
 
-**65 tests.** Two choices about fidelity are deliberate:
+**67 tests.** Two choices about fidelity are deliberate:
 
 - They run against **real Postgres**, not SQLite. The idempotency guarantee is a
   UNIQUE constraint and the audit log depends on a second connection seeing
@@ -381,7 +389,8 @@ pre-auth, capture (full, partial, multiple partial, over-capture refused),
 refund (full, partial, refused on an uncaptured auth), void (and refused after
 capture), timeout with and without successful reconciliation, network failure,
 non-2xx, unparseable body, concurrent idempotency, both safety gates, benchmark
-limits, credential encryption at rest, the no-direct-`httpx` and
+limits, credential encryption at rest, sealed queue payloads, the
+no-direct-`httpx` and
 no-hardcoded-domain source rules, dashboard arithmetic, and the HTTP layer.
 
 **What the tests do not prove:** that Geidea accepts these requests. The mock

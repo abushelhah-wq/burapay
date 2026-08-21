@@ -15,12 +15,14 @@ be told whether it succeeded.
 from __future__ import annotations
 
 import functools
-from typing import Any
+import json
+from typing import Any, Mapping
 
 from redis import Redis
 from rq import Queue
 
 from app.config import get_settings
+from app.security.crypto import decrypt, encrypt
 
 QUEUE_NAME = "burapay"
 
@@ -42,8 +44,37 @@ def get_queue() -> Queue:
     return Queue(QUEUE_NAME, connection=get_redis(), default_timeout=max(600, worst_case))
 
 
-def enqueue(function: Any, *args: Any, **kwargs: Any) -> Any:
-    return get_queue().enqueue(function, *args, **kwargs)
+def enqueue(function: Any, *args: Any, description: str | None = None, **kwargs: Any) -> Any:
+    """
+    Enqueue a job with an explicit description.
+
+    The description is not cosmetic. RQ builds one by ``repr``-ing the call when
+    none is given, and writes it to the worker log on every state change -- so a
+    job whose arguments contain card data would print that card data into the
+    application log. Passing a description that names the job instead of its
+    arguments is what stops that (§0.8).
+    """
+    return get_queue().enqueue(
+        function, *args, description=description or getattr(function, "__name__", "job"),
+        **kwargs,
+    )
+
+
+def seal(payload: Mapping[str, Any]) -> str:
+    """
+    Encrypt a job payload that carries cardholder data.
+
+    A queued job is persisted by Redis, so plaintext card data in a job
+    argument would be card data written to disk -- which §0.8 forbids as
+    plainly as writing it to a log table. The payload is sealed with the same
+    ENCRYPTION_KEY used for stored credentials and opened only inside the
+    worker, for the duration of the job.
+    """
+    return encrypt(json.dumps(dict(payload)))
+
+
+def unseal(token: str) -> dict[str, Any]:
+    return json.loads(decrypt(token))
 
 
 def queue_available() -> bool:

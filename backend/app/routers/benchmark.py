@@ -26,7 +26,7 @@ from app.schemas.settings import BenchmarkRunOut
 from app.security.auth import require_user
 from app.security.gates import assert_direct_card_entry_allowed
 from app.services.benchmark import RunStatus, create_run
-from app.workers.queue import enqueue, queue_available
+from app.workers.queue import enqueue, queue_available, seal
 from app.workers.tasks import run_benchmark
 
 router = APIRouter(prefix="/api/benchmark", tags=["benchmark"])
@@ -110,8 +110,14 @@ async def start_run(
         logger.error("benchmark run not queued: redis unreachable", extra={"run_id": run.id})
         return _out(run, gateway.code, integration.code)
 
-    card = payload.card.model_dump() if payload.card else None
-    enqueue(run_benchmark, run.id, card)
+    # Sealed before it reaches Redis: a queued job is persisted, so a plaintext
+    # card here would be card data on disk (§0.8). The description keeps RQ from
+    # writing a repr of the arguments into the worker log.
+    sealed_card = seal(payload.card.model_dump()) if payload.card else None
+    enqueue(
+        run_benchmark, run.id, sealed_card,
+        description=f"benchmark run {run.id} ({gateway.code} {operation.value} x{payload.count})",
+    )
     logger.info(
         "benchmark run queued",
         extra={"run_id": run.id, "gateway": gateway.code, "count": payload.count},

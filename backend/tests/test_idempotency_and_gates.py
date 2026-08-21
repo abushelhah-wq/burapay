@@ -345,3 +345,46 @@ async def test_unsupported_operation_is_typed_not_an_attribute_error(db, geidea)
     with pytest.raises(UnsupportedOperationError) as exc:
         await adapter.refund(object())
     assert exc.value.operation == "refund"
+
+
+# ---------------------------------------------------------------------------
+# Queued jobs must not carry card data (§0.8)
+# ---------------------------------------------------------------------------
+
+def test_queued_card_payload_is_sealed():
+    """
+    A queued job is persisted by Redis, so a plaintext card in a job argument
+    would be card data written to disk -- and RQ writes a repr of the call into
+    the worker log on every state change, so it would be card data in the
+    application log too.
+
+    Both were true before this was sealed; this test is what keeps them false.
+    """
+    from app.workers.queue import seal, unseal
+
+    card = {
+        "number": "4111111111111111", "exp_month": 12, "exp_year": 2030,
+        "cvv": "737", "holder_name": "Benchmark Runner",
+    }
+    sealed = seal(card)
+
+    assert "4111111111111111" not in sealed
+    assert "737" not in sealed
+    # Fernet tokens are urlsafe-base64 beginning with the 0x80 version byte.
+    assert sealed.startswith("gAAAAA")
+    # And it still round-trips, so the worker can actually charge the card.
+    assert unseal(sealed) == card
+
+
+def test_sealed_payload_survives_a_repr():
+    """
+    The specific failure this guards against: RQ logging the job's arguments.
+
+    ``repr`` of the sealed value must not contain the PAN, because that repr is
+    exactly what ends up in the worker log line.
+    """
+    from app.workers.queue import seal
+
+    sealed = seal({"number": "4111111111111111", "cvv": "737"})
+    assert "4111111111111111" not in repr((1, sealed))
+    assert "737" not in repr((1, sealed))
