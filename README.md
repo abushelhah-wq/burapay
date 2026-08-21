@@ -11,47 +11,73 @@ adapter module and adding one line to a registry.
 
 ---
 
-## Read this first: documentation access
+## Documentation status
 
-`docs.geidea.net` was **unreachable** when this was built — the deployment
-environment's egress proxy refuses the domain (403 on CONNECT for
-`docs.geidea.net`, `geidea.net`, `www.geidea.net` and `api.merchant.geidea.net`).
+`docs.geidea.net` is unreachable from the build environment — the egress proxy
+refuses the domain — so pages cannot be fetched during a build. Four were
+fetched externally and are committed under [`docs/geidea/`](docs/geidea/), which
+makes every claim below auditable rather than asserted:
 
-The build rules require every Geidea endpoint's request and response shape to be
-read from the live documentation before it is implemented, and forbid inventing
-a field name, status code or error format. Since no page could be fetched, the
-adapter does not pretend otherwise:
+| Page | Covers | Status |
+|---|---|---|
+| `01-tokenization.md` | tokenization / CIT, session shapes | implemented |
+| `02-merchant-initiated-mit.md` | MIT flow + its exact signature algorithm | implemented |
+| `03-standalone-save-card.md` | the separate save-card session endpoint | implemented |
+| `04-webhook-callback-notifications.md` | callback signature, lifecycle edges | implemented |
 
-- Every endpoint carries an explicit **provenance** in
-  [`backend/app/gateways/geidea/endpoints.py`](backend/app/gateways/geidea/endpoints.py).
-- Operations whose shape rests on **nothing** — standalone tokenization, CIT,
-  MIT, and callback signature verification — are **not implemented**. They raise
-  a typed `DocumentationRequiredError` naming the exact page needed, are absent
-  from the adapter's capability set, and are therefore hidden in the UI rather
-  than offered as buttons that cannot work.
-- Operations implemented from this repository's own earlier documentation study
-  (`docs/02_api_flow_comparison.md`, which cites the pages it came from) are
-  marked `doc_derived_unverified` and shown as such in the UI's **Documentation
-  status** panel.
-- The **signature construction** is the one inference that is shipped. Its field
-  order and timestamp format could not be confirmed, and the previous release
-  already listed both as open questions. It is shipped because a wrong signature
-  produces a clean rejection that gets logged — it cannot move money to the wrong
-  place — and because both are overridable from gateway config without a code
-  change. Everything that could move the *wrong amount* is blocked instead.
+Everything those pages cover is now built and tested. What they do not cover is
+still refused rather than guessed — the rule did not expire when the first
+batch arrived.
 
-**To clear the gaps:** fetch each page as markdown (`<url>.md` returns clean
-markdown), then update the matching `Endpoint` in `endpoints.py` — set
-`provenance=Provenance.DOC_VERIFIED`, fill in `verified_fields` and
-`verified_on`. The adapter needs no other change; `DocumentationRequiredError`
-stops being raised as soon as an operation's endpoints are no longer
-`UNDOCUMENTED`. The pages needed are listed in the UI and in `ALL_ENDPOINTS`.
+### Four signature algorithms, not one
 
-Consequently, **no flow has been run against the Geidea sandbox.** The sandbox
-host is blocked from this environment too, and no credentials were available.
-What *is* verified is described under [Tests](#tests).
+The single most dangerous thing about this integration: Geidea uses **four
+textually distinct signature schemes**, with different field lists and
+different concatenation orders. Pattern-matching one onto another produces a
+signature Geidea rejects cleanly, which presents as "the feature doesn't work"
+rather than as a signing bug.
 
----
+| Scheme | Signed string | Status |
+|---|---|---|
+| base / HPP session | *not published in the fetched pages* | **inferred** |
+| MIT `pay/token` | `{publicKey}{sessionId}{timeStamp}` | verified |
+| save-card session | `{timeStamp}{publicKey}{currency}` | verified |
+| callback verification | `{publicKey}{amount}{currency}{orderId}{status}{merchantRef}{timeStamp}` | verified |
+
+The MIT and callback implementations are checked byte-for-byte against the
+reference implementations the docs themselves ship
+(`test_signing_matches_the_documented_reference_implementations`).
+
+### Still outstanding
+
+- **The base/HPP session signature.** All four fetched pages defer to
+  `geidea-checkout-v2#signature` without reproducing it, so the implemented
+  concatenation is a reconstruction. It is shipped because a wrong signature
+  produces a clean, fully logged rejection — it cannot move money to the wrong
+  place — and because both the field order and the timestamp format are
+  overridable from gateway config without a redeploy. It is reported in the UI
+  as an advisory gap, not a blocking one.
+- **`geidea-checkout-v2.md`** also carries the GeideaCheckout SDK's script URL.
+  Geidea's hosted page opens from a `session_id` via that SDK rather than by
+  redirecting to a URL, so hosted checkout, CIT and save-card all return a
+  session id and say what to do with it instead of embedding a script URL
+  nobody has verified.
+- **`cancel-order-1.md`** — Cancel Order remains unimplemented and absent from
+  the capability set.
+- **`test-cards.md`** — the card-entry helper serves an empty list and explains
+  why, rather than offering a remembered card number.
+- **`api-response-codes-and-messages.md`** — only `000` is known, so an
+  unrecognised code is reported verbatim rather than translated into a category
+  it may not belong to.
+
+Fetch any of these as `<url>.md`, commit under `docs/geidea/`, and update the
+matching `Endpoint` in
+[`backend/app/gateways/geidea/endpoints.py`](backend/app/gateways/geidea/endpoints.py).
+Nothing else changes.
+
+**No flow has been run against the Geidea sandbox.** That host is blocked from
+this environment too, and no credentials were available. What *is* verified is
+described under [Tests](#tests).
 
 ## Architecture
 
@@ -167,7 +193,8 @@ deploy/Caddyfile             public reverse proxy (the default)
 docker-compose.yml           the whole stack
 docker-compose.traefik-network.yml   override for a host already running Traefik
 scripts/inspect-traefik.sh   run this ON THE VPS before using the override
-docs/                        the documentation research behind endpoints.py
+docs/geidea/                 the Geidea pages this adapter was built from
+docs/                        earlier cross-gateway documentation research
 legacy/                      the previous release — see legacy/README.md
 ```
 
@@ -367,7 +394,7 @@ DATABASE_URL=postgresql+asyncpg://burapay:burapay@127.0.0.1:5432/burapay_test \
   .venv/bin/python -m pytest -q
 ```
 
-**67 tests.** Two choices about fidelity are deliberate:
+**101 tests.** Two choices about fidelity are deliberate:
 
 - They run against **real Postgres**, not SQLite. The idempotency guarantee is a
   UNIQUE constraint and the audit log depends on a second connection seeing

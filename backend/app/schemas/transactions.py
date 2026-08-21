@@ -102,12 +102,28 @@ class TransactionDetail(TransactionOut):
 
 
 class HPPSessionOut(ApiModel):
+    """
+    A hosted session the customer must complete.
+
+    Returned by hosted checkout, save-card and customer-initiated token charges
+    -- all three create a session rather than completing server-side.
+
+    ``redirect_url`` may be absent. Geidea's hosted page is opened by its
+    JavaScript SDK from a ``session_id`` rather than by redirecting to a URL,
+    so ``session_id`` is the field that always matters and ``redirect_url`` is
+    populated only when the gateway returns one.
+    """
+
     transaction: TransactionOut
     redirect_url: Optional[str] = None
     session_id: Optional[str] = None
     #: Which response field the redirect URL was found under. Recorded because
     #: the canonical field name is not confirmed for every gateway.
     redirect_field: Optional[str] = None
+    #: Explains what the operator has to do next when there is no redirect URL
+    #: to follow. Server-side rather than hardcoded in the UI, because the
+    #: answer is gateway-specific.
+    next_step: Optional[str] = None
 
 
 class WebhookOut(ApiModel):

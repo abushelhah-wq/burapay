@@ -108,26 +108,57 @@ async def test_gateway_listing_reports_capabilities_and_doc_gaps(signed_in, geid
     assert geidea_out["configured"] is True
     assert geidea_out["missing_credentials"] == []
     assert "direct_api_sale" in geidea_out["capabilities"]
-    # The undocumented ones are absent, so the UI hides them.
-    assert "tokenize" not in geidea_out["capabilities"]
-    assert "charge_with_token_mit" not in geidea_out["capabilities"]
+    # Documented and implemented, so the UI offers them.
+    assert "tokenize" in geidea_out["capabilities"]
+    assert "charge_with_token_cit" in geidea_out["capabilities"]
+    assert "charge_with_token_mit" in geidea_out["capabilities"]
+    assert "verify_webhook" in geidea_out["capabilities"]
 
     blocking = [gap for gap in geidea_out["doc_gaps"] if gap["blocks_operation"]]
-    assert {gap["step_name"] for gap in blocking} >= {
-        "tokenize", "pay_with_token", "verify_webhook"
-    }
-    assert all(gap["doc_url"].startswith("https://docs.geidea.net") for gap in blocking)
+    # Only Cancel Order is still blocked; the rest had their pages retrieved.
+    assert {gap["step_name"] for gap in blocking} == {"cancel_order"}
+    assert all(gap["doc_url"].startswith("https://docs.geidea.net")
+               for gap in geidea_out["doc_gaps"])
 
 
-async def test_undocumented_operation_returns_501_with_the_doc_url(signed_in, geidea):
+async def test_save_card_session_is_created(signed_in, geidea):
+    """
+    §4g through the API. One merchant call; no token yet.
+
+    A save-card session does not return a token -- the customer has to enter a
+    card on the gateway's page first. The transaction stays PENDING, which is
+    the honest state, and the token arrives on the callback.
+    """
     response = await signed_in.post(
         "/api/payments/geidea/tokenize",
-        json={"idempotency_key": f"idem-{uuid.uuid4().hex}", "card": CARD},
+        json={"idempotency_key": f"idem-{uuid.uuid4().hex}", "currency": "SAR"},
     )
-    assert response.status_code == 501
-    detail = response.json()["detail"]
-    assert detail["code"] == "unsupported_operation"
-    assert detail["operation"] == "tokenize"
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    # A session, not a settled transaction: the customer still has to enter a
+    # card on the gateway's page.
+    assert body["session_id"]
+    transaction = body["transaction"]
+    assert transaction["operation"] == "TOKENIZE"
+    assert transaction["status"] == "PENDING"
+    assert transaction["request_count"] == 1
+    # Nothing is charged: Geidea voids the underlying authorisation itself.
+    assert transaction["amount"]["amount_minor"] == 0
+
+    # Geidea has no redirect URL -- its hosted page opens from a session id via
+    # a JavaScript SDK -- so the response says what to do instead of leaving a
+    # dead end.
+    assert body["redirect_url"] is None
+    assert "GeideaCheckout" in body["next_step"]
+    assert "geidea-checkout-v2" in body["next_step"]
+
+
+async def test_cancel_order_has_no_endpoint_because_it_is_undocumented(signed_in, geidea):
+    """The rule did not expire: what has no documentation still has no code."""
+    gateway = (await signed_in.get("/api/gateways/geidea")).json()
+    blocking = [g for g in gateway["doc_gaps"] if g["blocks_operation"]]
+    assert [g["step_name"] for g in blocking] == ["cancel_order"]
 
 
 async def test_direct_card_entry_gate_returns_403_when_disabled(
@@ -375,7 +406,13 @@ async def test_test_cards_endpoint_explains_an_empty_list(signed_in, geidea):
 
 
 async def test_webhook_is_stored_even_when_it_matches_nothing(client, geidea):
-    """§4k: an unmatched callback is evidence, not garbage."""
+    """
+    §4k: an unmatched callback is evidence, not garbage.
+
+    It is also unsigned here, so verification runs and fails -- ``False``, a
+    real verdict, rather than the ``None`` that used to mean "no verifier
+    exists". The payload is still stored either way.
+    """
     response = await client.post(
         "/api/webhooks/geidea",
         json={"order": {"orderId": "ord_unknown", "status": "Paid"}},
@@ -384,9 +421,7 @@ async def test_webhook_is_stored_even_when_it_matches_nothing(client, geidea):
     body = response.json()
     assert body["received"] is True
     assert body["matched_transaction_id"] is None
-    # The signature scheme is undocumented, so this is null -- not a fabricated
-    # true or false.
-    assert body["signature_valid"] is None
+    assert body["signature_valid"] is False
 
 
 async def test_webhook_for_an_unknown_gateway_is_404(client):

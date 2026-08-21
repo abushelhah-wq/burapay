@@ -5,25 +5,30 @@ WHY THIS FILE EXISTS
 --------------------
 §0.1 requires each Geidea documentation page to be fetched and read before the
 matching endpoint is implemented, and §0.2 forbids inventing a field name,
-status code or error format. During this build ``docs.geidea.net`` was
-**unreachable** -- the domain is refused by the deployment's egress proxy
-(``403`` on CONNECT for ``docs.geidea.net``, ``geidea.net``, ``www.geidea.net``
-and ``api.merchant.geidea.net``). No page could be fetched, so nothing here was
-verified against a live doc during this build.
+status code or error format. ``docs.geidea.net`` is still unreachable from this
+build environment -- the egress proxy refuses the domain -- so pages cannot be
+fetched here directly.
 
-Rather than silently shipping remembered shapes, every endpoint carries an
-explicit :class:`Provenance`, and the adapter refuses outright to call anything
-marked ``UNDOCUMENTED``. The provenance is exposed through the API and rendered
-in the UI, so an operator can see which flows rest on unverified ground before
-they trust a measurement taken with them.
+Four pages were fetched externally and committed to ``docs/geidea/``:
 
-HOW TO CLEAR THE GAPS
----------------------
-Fetch each page below as markdown (``<url>.md`` returns clean markdown) and
-update the entry: set ``provenance=Provenance.DOC_VERIFIED``, fill in
-``verified_fields``, and set ``verified_on`` to the date. The adapter needs no
-other change -- ``DocumentationRequiredError`` stops being raised as soon as an
-operation's endpoints are no longer ``UNDOCUMENTED``.
+    01-tokenization.md                  tokenization / CIT
+    02-merchant-initiated-mit.md        MIT, incl. its exact signature algorithm
+    03-standalone-save-card.md          the separate save-card session endpoint
+    04-webhook-callback-notifications.md callback signature + lifecycle edges
+
+Everything those pages cover is now ``DOC_VERIFIED`` and implemented. What they
+do NOT cover stays blocked or flagged, in particular the **base/HPP session
+signature**, which all four pages defer to ``geidea-checkout-v2#signature``
+without reproducing. See ``docs/geidea/00-README.md`` for the outstanding list.
+
+HOW TO CLEAR THE REMAINING GAPS
+-------------------------------
+Fetch the page (``<url>.md`` returns clean markdown), commit it under
+``docs/geidea/``, then update the entry here: set
+``provenance=Provenance.DOC_VERIFIED``, fill in ``verified_fields`` and
+``verified_on``. The adapter needs no other change --
+``DocumentationRequiredError`` stops being raised as soon as an operation's
+endpoints are no longer ``UNDOCUMENTED``.
 """
 
 from __future__ import annotations
@@ -39,8 +44,8 @@ REFERENCE_ROOT = "https://docs.geidea.net/reference"
 class Provenance(str, enum.Enum):
     """How much evidence stands behind an endpoint definition."""
 
-    #: Read from the live doc page during this build. Nothing has this yet --
-    #: see the module docstring.
+    #: Read from the documentation page itself. The page is committed under
+    #: ``docs/geidea/`` so the claim is auditable rather than asserted.
     DOC_VERIFIED = "doc_verified"
 
     #: Endpoint path, method and field names recorded in this repository's
@@ -77,6 +82,11 @@ class Endpoint:
     missing: str = ""
     verified_on: Optional[str] = None
     verified_fields: tuple[str, ...] = field(default=())
+    #: True for an entry that is not a callable endpoint but a caveat attached
+    #: to one -- BASE_SIGNATURE is a computed value, not a request. An advisory
+    #: entry is reported as a gap but never blocks an operation, because there
+    #: is no call for it to block.
+    advisory: bool = False
 
     @property
     def usable(self) -> bool:
@@ -84,6 +94,10 @@ class Endpoint:
         return self.provenance in (
             Provenance.DOC_VERIFIED, Provenance.DOC_DERIVED_UNVERIFIED
         )
+
+    @property
+    def blocks_operation(self) -> bool:
+        return not self.usable and not self.advisory
 
     def format(self, base: str, **params: str) -> str:
         return f"{base.rstrip('/')}{self.path.format(**params)}"
@@ -116,14 +130,45 @@ CREATE_SESSION = Endpoint(
     method="POST",
     path="/payment-intent/api/v2/direct/session",
     doc_url=f"{DOCS_ROOT}/geidea-checkout-v2.md",
-    provenance=Provenance.DOC_DERIVED_UNVERIFIED,
+    # Path and body fields are confirmed by worked samples in
+    # docs/geidea/01-tokenization.md and docs/geidea/02-merchant-initiated-mit.md.
+    # The signature VALUE is tracked separately as BASE_SIGNATURE below, because
+    # it is the one thing those pages defer rather than state.
+    provenance=Provenance.DOC_VERIFIED,
+    verified_on="2026-08-21",
+    verified_fields=(
+        "amount", "currency", "merchantReferenceId", "timestamp", "signature",
+        "callbackUrl", "returnUrl", "language", "cardOnFile", "tokenId",
+        "initiatedBy", "cofAgreement", "agreementId", "agreementType",
+        "paymentOperation",
+    ),
     request_fields=(
         "amount", "currency", "merchantReferenceId", "timestamp", "signature",
         "callbackUrl", "returnUrl",
     ),
     missing=(
-        "The exact signature payload and timestamp format are NOT documented "
-        "and are reconstructed by inference -- see signing.py."
+        "The signature VALUE for this call is still inferred -- see "
+        "BASE_SIGNATURE. Every other field on this endpoint is confirmed."
+    ),
+)
+
+BASE_SIGNATURE = Endpoint(
+    step_name="base_signature",
+    method="",
+    path="",
+    doc_url=f"{DOCS_ROOT}/geidea-checkout-v2.md",
+    provenance=Provenance.INFERRED,
+    advisory=True,
+    missing=(
+        "The base/HPP session signature formula is the one thing all four "
+        "fetched pages defer to geidea-checkout-v2#signature without "
+        "reproducing. The implemented concatenation is a reconstruction. It is "
+        "shipped because a wrong signature produces a clean, fully logged "
+        "rejection -- it cannot move money to the wrong place -- and because "
+        "the field order and timestamp format are both overridable from "
+        "gateway config without a redeploy. The three signature formulas that "
+        "ARE documented (MIT, save-card, callback) are implemented verbatim "
+        "and are not affected by this gap."
     ),
 )
 
@@ -209,29 +254,44 @@ PAY_WITH_TOKEN = Endpoint(
     method="POST",
     path="/pgw/api/v2/direct/pay/token",
     doc_url=f"{DOCS_ROOT}/merchant-initiated-mit.md",
-    # The PATH is doc-derived, but the fields that mark a charge as
-    # merchant-initiated versus customer-initiated are not. §4i is explicit
-    # that those indicator flags must come from the doc rather than be
-    # guessed, so the operations that need them stay blocked.
-    provenance=Provenance.UNDOCUMENTED,
-    missing=(
-        "The initiator/indicator field names and their permitted values "
-        "(merchant- vs customer-initiated, agreement type, consent record "
-        "schema) are not field-level specified in the material available. §4i "
-        "requires these to be read from the doc, not inferred."
+    provenance=Provenance.DOC_VERIFIED,
+    verified_on="2026-08-21",
+    # Note "sessionid" -- lowercase 'i' -- exactly as the doc's sample shows.
+    # Not normalised to sessionId: the sample is the only evidence available,
+    # and "correcting" it would be inventing a field name.
+    verified_fields=(
+        "sessionid", "callbackUrl", "initiatedBy", "agreementId",
+        "agreementType", "signature",
+    ),
+    request_fields=(
+        "sessionid", "callbackUrl", "initiatedBy", "agreementId",
+        "agreementType", "signature",
     ),
 )
 
-TOKENIZE = Endpoint(
-    step_name="tokenize",
+SAVE_CARD_SESSION = Endpoint(
+    step_name="save_card_session",
     method="POST",
-    path="",
+    path="/payment-intent/api/v2/direct/session/saveCard",
     doc_url=f"{DOCS_ROOT}/save-card.md",
-    provenance=Provenance.UNDOCUMENTED,
+    provenance=Provenance.DOC_VERIFIED,
+    verified_on="2026-08-21",
+    verified_fields=(
+        "currency", "callbackUrl", "returnUrl", "language", "appearance",
+        "cofAgreement", "merchantReferenceId", "signature", "timeStamp",
+    ),
+    request_fields=(
+        "currency", "callbackUrl", "returnUrl", "merchantReferenceId",
+        "signature", "timeStamp", "cofAgreement",
+    ),
+    # The page's prose says "/savecard/create-session" while its worked sample
+    # posts to "/payment-intent/api/v2/direct/session/saveCard". The sample is
+    # taken as authoritative: it is a literal, complete request, whereas the
+    # prose is a paraphrase.
     missing=(
-        "No endpoint path, request shape or response shape for a stand-alone "
-        "save-card / tokenization call is available. Both save-card.md and "
-        "tokenization.md are required."
+        "The page's prose names the endpoint /savecard/create-session, which "
+        "contradicts its own worked sample. The sample's path is used. Confirm "
+        "against a sandbox call before relying on it."
     ),
 )
 
@@ -249,24 +309,68 @@ WEBHOOK_SIGNATURE = Endpoint(
     method="",
     path="",
     doc_url=f"{DOCS_ROOT}/sample-callback-responses.md",
-    provenance=Provenance.UNDOCUMENTED,
+    provenance=Provenance.DOC_VERIFIED,
+    verified_on="2026-08-21",
+    # The signature travels in the callback BODY, as a top-level "signature"
+    # key alongside "order" -- not in a header. Confirmed by the worked
+    # callback payload in docs/geidea/01-tokenization.md.
+    verified_fields=(
+        "signature", "order.amount", "order.currency", "order.orderId",
+        "order.status", "order.merchantReferenceId", "timestamp",
+    ),
     missing=(
-        "The callback signature algorithm, the header carrying it, and the "
-        "exact string it is computed over are all unknown. A verifier written "
-        "without them would either reject every genuine callback or, worse, "
-        "accept forged ones -- so callbacks are stored with "
-        "signature_valid = NULL ('not verifiable') rather than a fabricated "
-        "true/false."
+        "The page gives the field list and a Python reference implementation "
+        "but no worked numeric example, and asks for the result to be checked "
+        "against one real sandbox callback. Which timestamp field feeds the "
+        "signature is not stated explicitly, so several candidates are tried "
+        "and the one that verifies is recorded."
     ),
 )
 
 
 #: Every endpoint, for the capability/gap report the API exposes.
 ALL_ENDPOINTS: tuple[Endpoint, ...] = (
-    CREATE_SESSION, ORDER_QUERY, INITIATE_AUTHENTICATION, AUTHENTICATE_PAYER,
-    PAY, CAPTURE, REFUND, VOID, PAY_WITH_TOKEN, TOKENIZE, CANCEL_ORDER,
-    WEBHOOK_SIGNATURE,
+    CREATE_SESSION, BASE_SIGNATURE, ORDER_QUERY, INITIATE_AUTHENTICATION,
+    AUTHENTICATE_PAYER, PAY, CAPTURE, REFUND, VOID, PAY_WITH_TOKEN,
+    SAVE_CARD_SESSION, CANCEL_ORDER, WEBHOOK_SIGNATURE,
 )
+
+# ---------------------------------------------------------------------------
+# Documented field values
+# ---------------------------------------------------------------------------
+# Verbatim from the fetched pages. Named constants rather than inline literals
+# so a value that turns out to be wrong is corrected in one place, and so it is
+# obvious which strings are Geidea's vocabulary rather than ours.
+
+#: docs/geidea/02: the initiator on a customer-present tokenizing payment.
+INITIATED_BY_INTERNET = "Internet"
+#: docs/geidea/02: the initiator on a merchant-initiated charge.
+INITIATED_BY_MERCHANT = "Merchant"
+#: docs/geidea/02 and 03. The samples show "Unscheduled" in prose and
+#: "unscheduled" in the JSON bodies; the JSON casing is used.
+AGREEMENT_TYPE_UNSCHEDULED = "unscheduled"
+#: docs/geidea/03: distinguishes a save-card session from a payment session.
+PAYMENT_OPERATION_SAVE_CARD = "SaveCard"
+PAYMENT_OPERATION_PAY = "Pay"
+PAYMENT_OPERATION_AUTHORIZE = "Authorize"
+
+#: docs/geidea/04, "Verification checklist before acting on a callback".
+#: ALL of these must hold before a callback is treated as a success. A valid
+#: signature with a non-000 response code is an authentic *failure* notice.
+CALLBACK_SUCCESS_CHECKS: dict[str, str] = {
+    "responseCode": "000",
+    "responseMessage": "Success",
+    "detailedResponseCode": "000",
+    "detailedResponseMessage": "The operation was successful",
+}
+
+#: docs/geidea/04: an order stays InProgress while the customer is still on the
+#: 3DS page or is retrying, and NO callback is sent during that time. Treating
+#: "no callback yet" as failure would be wrong.
+ORDER_STATUS_IN_PROGRESS = "InProgress"
+
+#: docs/geidea/04: the one abandonment case that DOES produce a callback.
+CANCELLED_BY_USER_MESSAGE = "Transaction Cancelled By User."
 
 
 # ---------------------------------------------------------------------------

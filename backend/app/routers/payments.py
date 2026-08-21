@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.db import get_session
 from app.gateways.base import Capability
 from app.gateways.errors import InvalidTransactionState
@@ -203,6 +204,7 @@ async def create_hpp_session(
         redirect_url=getattr(result, "redirect_url", None),
         session_id=getattr(result, "session_id", None),
         redirect_field=getattr(result, "redirect_field", None),
+        next_step=_next_step(gateway, getattr(result, "session_id", None)),
     )
 
 
@@ -468,33 +470,44 @@ async def _child_operation(
 # (g, h, i) Token operations
 # ---------------------------------------------------------------------------
 
-@router.post("/{code}/tokenize", response_model=TransactionOut)
+@router.post("/{code}/tokenize", response_model=HPPSessionOut)
 async def tokenize(
     code: str,
     payload: TokenizeRequest,
     session: AsyncSession = Depends(get_session),
     _user=Depends(require_user),
 ) -> TransactionOut:
-    """Stand-alone save-card (§4g). Stores the token reference, never the PAN."""
-    require_direct_card_entry()
+    """
+    Stand-alone save-card (§4g). Stores the token reference, never the PAN.
+
+    The raw-card gate applies only when a card is actually supplied. A save-card
+    flow where the customer types the card on the gateway's own page never puts
+    this service in the card's path, so gating it on ALLOW_DIRECT_CARD_ENTRY
+    would block the safer of the two options for no reason.
+    """
     gateway = await _gateway(session, code)
+    if payload.card is not None:
+        require_direct_card_entry()
     _require_capability(gateway, Capability.TOKENIZE)
     integration = await _integration_type(session, IntegrationTypeCode.TOKENIZE)
 
+    settings = get_settings()
     transaction, _ = await execution.get_or_create_transaction(
         session,
         gateway=gateway,
         integration_type=integration,
         operation=Operation.TOKENIZE,
-        idempotency_key=payload.idempotency_key,
+        # A save-card flow charges nothing: the gateway authorises a nominal
+        # amount and voids it itself once the token is issued.
         amount_minor=0,
-        currency="SAR",
+        idempotency_key=payload.idempotency_key,
+        currency=payload.currency or settings.TEST_CURRENCY,
     )
-    card = _raw_card(payload.card)
+    card = _raw_card(payload.card) if payload.card else None
     holder: dict[str, object] = {}
 
     async def runner(adapter):
-        result = await adapter.tokenize(card)
+        result = await adapter.tokenize(card, _order(transaction, gateway))
         holder["result"] = result
         return result
 
@@ -507,17 +520,30 @@ async def tokenize(
             session, gateway=gateway, transaction=transaction, result=result
         )
         await session.commit()
-    return await _serialise(session, transaction)
+
+    return HPPSessionOut(
+        transaction=await _serialise(session, transaction),
+        redirect_url=getattr(result, "redirect_url", None),
+        session_id=getattr(result, "session_id", None),
+        redirect_field=getattr(result, "redirect_field", None),
+        next_step=_next_step(gateway, getattr(result, "session_id", None)),
+    )
 
 
-@router.post("/{code}/token/cit", response_model=TransactionOut)
+@router.post("/{code}/token/cit", response_model=HPPSessionOut)
 async def charge_token_cit(
     code: str,
     payload: TokenChargeRequest,
     session: AsyncSession = Depends(get_session),
     _user=Depends(require_user),
-) -> TransactionOut:
-    """Customer-initiated charge against a stored token (§4h)."""
+) -> HPPSessionOut:
+    """
+    Customer-initiated charge against a stored token (§4h).
+
+    One merchant call. The customer is present and completes the charge on the
+    gateway's hosted page, so this returns a session rather than a settled
+    payment -- the transaction stays PENDING until the callback arrives.
+    """
     return await _token_charge(session, code, payload, Operation.CIT_CHARGE)
 
 
@@ -532,12 +558,35 @@ async def charge_token_mit(
     return await _token_charge(session, code, payload, Operation.MIT_CHARGE)
 
 
+def _next_step(gateway: Gateway, session_id: Optional[str]) -> Optional[str]:
+    """
+    What the operator does with a session that has no redirect URL.
+
+    Geidea opens its hosted page from a session id using its own JavaScript
+    SDK. The SDK's script URL is documented on the Checkout page, which has not
+    been retrieved -- so this says what is known and what is missing rather than
+    inventing a URL to load a script from.
+    """
+    if not session_id:
+        return None
+    if gateway.code != "geidea":
+        return None
+    return (
+        f"Session {session_id} is ready. Geidea opens its hosted page from a "
+        f"session id via the GeideaCheckout JavaScript SDK rather than a "
+        f"redirect URL. The SDK's script URL is documented on "
+        f"https://docs.geidea.net/docs/geidea-checkout-v2.md, which has not "
+        f"been retrieved, so it is not embedded here. Pass this session id to "
+        f"GeideaCheckout.startPayment() to complete the flow."
+    )
+
+
 async def _token_charge(
     session: AsyncSession,
     code: str,
     payload: TokenChargeRequest,
     operation: Operation,
-) -> TransactionOut:
+):
     gateway = await _gateway(session, code)
     is_mit = operation is Operation.MIT_CHARGE
     _require_capability(
@@ -574,16 +623,33 @@ async def _token_charge(
         token_reference=token.token_reference,
     )
 
+    holder: dict[str, object] = {}
+
     async def runner(adapter):
         order = _order(transaction, gateway)
-        if is_mit:
-            return await adapter.charge_with_token_mit(token, order)
-        return await adapter.charge_with_token_cit(token, order)
+        result = (
+            await adapter.charge_with_token_mit(token, order)
+            if is_mit
+            else await adapter.charge_with_token_cit(token, order)
+        )
+        holder["result"] = result
+        return result
 
     await execution.execute(
         session, gateway=gateway, transaction=transaction, runner=runner
     )
-    return await _serialise(session, transaction)
+    serialised = await _serialise(session, transaction)
+    if is_mit:
+        # MIT completes server-to-server; there is no session for anyone to open.
+        return serialised
+
+    result = holder.get("result")
+    return HPPSessionOut(
+        transaction=serialised,
+        redirect_url=getattr(result, "challenge_url", None),
+        session_id=getattr(result, "session_id", None),
+        next_step=_next_step(gateway, getattr(result, "session_id", None)),
+    )
 
 
 # ---------------------------------------------------------------------------

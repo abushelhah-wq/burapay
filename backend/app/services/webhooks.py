@@ -4,22 +4,34 @@ Inbound callback handling (§4k).
 The order of operations matters and is deliberate:
 
 1. **Store the raw payload first**, before verification or interpretation. A
-   callback that fails signature checking is evidence, not garbage -- throwing
-   it away is how "the gateway says it sent a callback and we have no record"
-   becomes unanswerable.
-2. **Verify the signature** where the adapter can. Where the algorithm is not
-   documented, ``signature_valid`` is left NULL, meaning "not verifiable on
-   this build" -- distinct from both valid and forged. A fabricated boolean
-   would be worse than an honest null.
-3. **Match to a transaction** by merchant reference or gateway order id.
-4. **Detect replays.** A repeated event reference, or a callback for an already
-   terminal transaction, is recorded and linked to the original rather than
-   re-applied. A duplicate callback must never double-process.
-5. **Reconcile against an authenticated call.** Because the callback's
-   authenticity cannot always be established, the transaction's status is
-   confirmed with an order query rather than taken from the payload -- §4a is
-   explicit that the redirect return is not authoritative, and the same caution
-   applies to an unverified callback.
+   callback that fails signature checking is evidence, not garbage -- discarding
+   it is how "the gateway says it sent a callback and we have no record" becomes
+   unanswerable.
+2. **Verify the signature.** For Geidea this is a real HMAC-SHA256 check over
+   the documented field list (docs/geidea/04). ``signature_valid`` is ``True``,
+   ``False``, or ``NULL`` when the gateway's adapter cannot verify at all --
+   three distinct states, none of them fabricated.
+3. **Refuse to act on an unverified payload.** A callback whose signature does
+   NOT verify updates nothing. It is stored, flagged, and surfaced -- early in
+   an integration it usually means a credential mismatch rather than an attack,
+   which is exactly why it needs to be visible instead of silently dropped.
+4. **Apply the documented success checklist**, not just the signature. A valid
+   signature with ``responseCode != "000"`` is an authentic *failure* notice.
+   Treating "signature valid" as "payment succeeded" would book declines as
+   revenue.
+5. **Detect replays.** A repeated order/status pair is recorded against the
+   original rather than re-applied, and a transaction already in a terminal
+   state is never re-processed.
+
+Two lifecycle facts from the documentation shape the rest of the system:
+
+* An order sits at ``InProgress`` while the customer is on the 3DS page or is
+  retrying, and **no callback is sent during that time**. "No callback yet" is
+  therefore not evidence of failure -- reconciliation polls instead of assuming.
+* One callback consolidates every attempt against an order into a single
+  ``transactions[]`` array. Several failed sub-transactions followed by a
+  success is a *successful* payload; only the outer order status is
+  authoritative.
 """
 
 from __future__ import annotations
@@ -30,10 +42,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gateways.base import WebhookEvent
-from app.gateways.errors import DocumentationRequiredError, UnsupportedOperationError
+from app.gateways.errors import (
+    CredentialsMissing, DocumentationRequiredError, UnsupportedOperationError,
+)
 from app.logging_setup import get_logger
+from app.gateways.registry import get_adapter_class
 from app.models import (
-    Gateway, TERMINAL_STATUSES, Transaction, TransactionStatus, WebhookReceived,
+    Gateway, TERMINAL_STATUSES, Token, Transaction, TransactionStatus,
+    WebhookReceived,
 )
 from app.redaction import redact_body, redact_headers
 from app.services.execution import build_adapter
@@ -78,16 +94,17 @@ async def verify_signature(
     Verify the callback signature, or report that it cannot be verified.
 
     Returns ``True``/``False`` when the adapter can decide, and ``None`` when
-    the verification scheme is undocumented for this gateway. ``None`` is not a
-    pass -- callers treat it as "do not trust this payload", which is why
-    reconciliation always goes through an authenticated order query.
+    this gateway has no verification scheme implemented, or when the credentials
+    needed to verify are missing. ``None`` is never treated as a pass: it routes
+    reconciliation through an authenticated order query instead.
     """
     try:
         adapter = await build_adapter(session, gateway, transaction_id=None)
         return await adapter.verify_webhook(headers, body_bytes)
-    except (DocumentationRequiredError, UnsupportedOperationError) as exc:
+    except (DocumentationRequiredError, UnsupportedOperationError, CredentialsMissing) as exc:
+        # Cannot verify -- distinct from verifying and failing.
         logger.warning(
-            "callback signature could not be verified",
+            "callback signature could not be checked",
             extra={"gateway": gateway.code, "reason": exc.code},
         )
         return None
@@ -206,7 +223,14 @@ async def process_webhook(
         await session.flush()
         return record
 
-    await apply_event(session, gateway=gateway, transaction=transaction, event=event)
+    await apply_event(
+        session,
+        gateway=gateway,
+        transaction=transaction,
+        event=event,
+        signature_valid=record.signature_valid,
+        body_json=body_json,
+    )
     await session.flush()
     return record
 
@@ -217,19 +241,46 @@ async def apply_event(
     gateway: Gateway,
     transaction: Transaction,
     event: WebhookEvent,
+    signature_valid: Optional[bool],
+    body_json: Any,
 ) -> None:
     """
-    Update a transaction from a callback, idempotently.
+    Update a transaction from a callback, idempotently and only when trusted.
 
-    A transaction already in a terminal state is left alone: replaying a
-    callback must not re-apply it (§4k). Identifiers are still backfilled,
-    because learning the gateway's order id from a callback is useful even when
-    the status is settled.
+    The signature decides whether the payload may change anything:
+
+    * ``False`` -- verified and wrong. Nothing is updated, not even an
+      identifier. Recorded for investigation.
+    * ``True``  -- authentic. The documented success checklist then decides
+      SUCCESS versus FAILED.
+    * ``None``  -- unverifiable on this build. Identifiers are backfilled and
+      the status is settled by an authenticated order query instead.
+
+    A transaction already in a terminal state is never re-processed (§4k).
     """
+    if signature_valid is False:
+        logger.error(
+            "callback signature did not verify; refusing to apply it. Early in "
+            "an integration this usually means the wrong API password or public "
+            "key is configured, not an attack.",
+            extra={
+                "gateway": gateway.code,
+                "transaction_id": transaction.id,
+                "merchant_reference": event.merchant_reference,
+            },
+        )
+        return
+
     if event.gateway_order_id and not transaction.gateway_order_id:
         transaction.gateway_order_id = event.gateway_order_id
     if event.gateway_transaction_id and not transaction.gateway_transaction_id:
         transaction.gateway_transaction_id = event.gateway_transaction_id
+
+    # A token can arrive on a callback for a transaction that is already
+    # settled, so capture it before the terminal-state check.
+    await _capture_token(
+        session, gateway=gateway, transaction=transaction, body_json=body_json
+    )
 
     if TransactionStatus(transaction.status) in TERMINAL_STATUSES:
         logger.info(
@@ -240,28 +291,165 @@ async def apply_event(
         await session.flush()
         return
 
-    # §4a: neither the redirect return nor an unverified callback is
-    # authoritative. Confirm with an authenticated order query, and fall back
-    # to the callback's own status only if the query is impossible.
-    resolved = await _confirm_by_query(session, gateway, transaction)
-    if resolved is None and event.status:
-        adapter_class = type(await build_adapter(session, gateway, transaction_id=None))
-        normalise = getattr(adapter_class, "normalise_status", None)
-        resolved = normalise(event.status) if normalise else None
-        if resolved is not None:
+    resolved: Optional[TransactionStatus] = None
+
+    if signature_valid is True:
+        adapter_class = get_adapter_class(gateway.code)
+        reports_success = getattr(adapter_class, "callback_reports_success", None)
+        if reports_success is not None and reports_success(body_json):
+            resolved = TransactionStatus.SUCCESS
+        else:
+            normalise = getattr(adapter_class, "normalise_status", None)
+            candidate = normalise(event.status) if (normalise and event.status) else None
+            # An authenticated callback that does not meet the success
+            # checklist is a decline, unless the gateway says the order is
+            # still in flight -- InProgress is documented as non-terminal, and
+            # forcing it to FAILED would kill a payment the customer is still
+            # completing.
+            resolved = (
+                TransactionStatus.PENDING
+                if candidate is TransactionStatus.PENDING
+                else TransactionStatus.FAILED
+            )
             logger.info(
-                "order query unavailable; using the callback's own status",
-                extra={"transaction_id": transaction.id, "status": resolved.value},
+                "authentic callback reporting a non-success outcome",
+                extra={
+                    "transaction_id": transaction.id,
+                    "gateway_status": event.status,
+                    "error_code": event.error_code,
+                },
             )
 
-    if resolved is not None:
+        # Amount cross-check, per the documented checklist. A mismatch means the
+        # callback is authentic but does not describe this order's amount, which
+        # is worth refusing to book rather than reconciling away.
+        if (
+            resolved is TransactionStatus.SUCCESS
+            and event.amount_minor is not None
+            and transaction.amount_minor
+            and event.amount_minor != transaction.amount_minor
+        ):
+            logger.error(
+                "callback amount does not match the recorded transaction amount; "
+                "not marking it successful",
+                extra={
+                    "transaction_id": transaction.id,
+                    "callback_amount_minor": event.amount_minor,
+                    "transaction_amount_minor": transaction.amount_minor,
+                },
+            )
+            resolved = None
+    else:
+        # Unverifiable: settle it with a call we authenticated ourselves.
+        resolved = await _confirm_by_query(session, gateway, transaction)
+
+    if resolved is not None and resolved is not TransactionStatus.PENDING:
         transaction.status = resolved.value
         if transaction.completed_at is None:
             transaction.completed_at = utcnow()
+
     if event.error_code and event.error_code != "000":
         transaction.error_code = event.error_code
         transaction.error_message = event.error_message
     await session.flush()
+
+
+async def _capture_token(
+    session: AsyncSession,
+    *,
+    gateway: Gateway,
+    transaction: Transaction,
+    body_json: Any,
+) -> None:
+    """
+    Store a ``tokenId`` that arrived on a callback (§4g).
+
+    A saved card is not created by the request that started the flow -- the
+    customer enters the card on the gateway's page, and the token comes back
+    here. The agreement identifier is the one this platform generated at
+    tokenization time; the gateway does not issue one, and the exact same value
+    has to be replayed on every later merchant-initiated charge.
+    """
+    adapter_class = get_adapter_class(gateway.code)
+    extract = getattr(adapter_class, "token_from_webhook", None)
+    if extract is None:
+        return
+    token_reference = extract(body_json)
+    if not token_reference:
+        return
+
+    existing = await session.execute(
+        select(Token).where(
+            Token.gateway_id == gateway.id,
+            Token.token_reference == token_reference,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        return
+
+    card = _card_from_callback(body_json)
+    session.add(
+        Token(
+            gateway_id=gateway.id,
+            token_reference=token_reference,
+            agreement_reference=transaction.merchant_reference,
+            card_brand=card.get("brand"),
+            card_last4=card.get("last4"),
+            card_exp_month=card.get("exp_month"),
+            card_exp_year=card.get("exp_year"),
+            created_from_transaction_id=transaction.id,
+            is_active=True,
+        )
+    )
+    transaction.token_reference = token_reference
+    await session.flush()
+    logger.info(
+        "stored card token from callback",
+        extra={"gateway": gateway.code, "transaction_id": transaction.id},
+    )
+
+
+def _card_from_callback(body_json: Any) -> dict[str, Any]:
+    """
+    The card attributes §0.8 permits, read from a callback's payment method.
+
+    Only brand, last four and expiry are taken. ``maskedCardNumber`` arrives as
+    ``444000******0010``; the last four are sliced from it and the rest is left
+    behind.
+    """
+    out: dict[str, Any] = {}
+    if not isinstance(body_json, dict):
+        return out
+    order = body_json.get("order")
+    if not isinstance(order, dict):
+        return out
+    transactions = order.get("transactions")
+    if not isinstance(transactions, list):
+        return out
+    for entry in transactions:
+        if not isinstance(entry, dict):
+            continue
+        method = entry.get("paymentMethod")
+        if not isinstance(method, dict):
+            continue
+        brand = method.get("brand")
+        if brand:
+            out["brand"] = str(brand).upper()
+        masked = str(method.get("maskedCardNumber") or "")
+        digits = "".join(ch for ch in masked if ch.isdigit())
+        if len(digits) >= 4:
+            out["last4"] = digits[-4:]
+        expiry = method.get("expiryDate")
+        if isinstance(expiry, dict):
+            month, year = expiry.get("month"), expiry.get("year")
+            if month:
+                out["exp_month"] = int(month)
+            if year:
+                # The sample shows a two-digit year (39). Normalise to four
+                # digits rather than storing an ambiguous value.
+                year_int = int(year)
+                out["exp_year"] = year_int + 2000 if year_int < 100 else year_int
+    return out
 
 
 async def _confirm_by_query(

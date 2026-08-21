@@ -102,7 +102,30 @@ class DirectPaymentRequest(IdempotentRequest, AmountMixin):
 
 
 class TokenizeRequest(IdempotentRequest):
-    card: CardIn
+    """
+    Start a save-card flow.
+
+    ``card`` is optional and, for Geidea, unused: the customer enters the card
+    on the gateway's hosted page, so this service never sees it. It stays on the
+    model because other gateways do accept a card server-side for tokenization,
+    and the raw-card gate still applies whenever one is supplied.
+
+    ``currency`` is required because the save-card signature is computed over
+    it, even though nothing is charged.
+    """
+
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    card: Optional[CardIn] = None
+
+    @field_validator("currency")
+    @classmethod
+    def _known_currency(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        code = value.strip().upper()
+        if code not in CURRENCY_EXPONENTS:
+            raise ValueError(f"Unsupported currency {code}.")
+        return code
 
 
 class TokenChargeRequest(IdempotentRequest, AmountMixin):

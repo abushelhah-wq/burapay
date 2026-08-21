@@ -43,32 +43,43 @@ const OPERATIONS = [
   },
   {
     key: 'tokenize',
-    label: 'Tokenize (save card)',
+    label: 'Save card (tokenize)',
     integration: 'TOKENIZE',
     capability: 'tokenize',
-    needsCard: true,
+    needsCard: false,
     needsAmount: false,
-    help: 'Stores a token reference. The card number itself is never stored.',
+    needsCurrency: true,
+    help:
+      'Saves a card with no purchase. The customer enters the card on the ' +
+      "gateway's own page, so this service never sees it, and the gateway " +
+      'voids the underlying authorisation itself — nothing is charged. The ' +
+      'token arrives later, on the callback.',
   },
   {
     key: 'cit',
-    label: 'Charge stored card (CIT)',
+    label: 'Charge saved card — customer present (CIT)',
     integration: 'TOKEN_CIT',
     capability: 'charge_with_token_cit',
     needsCard: false,
     needsAmount: true,
     needsToken: true,
-    help: 'Customer-initiated charge against a saved token.',
+    help:
+      'One merchant round trip. The customer is present and completes the ' +
+      'charge on the hosted page, so the transaction stays pending until the ' +
+      'callback settles it.',
   },
   {
     key: 'mit',
-    label: 'Charge stored card (MIT)',
+    label: 'Charge saved card — merchant initiated (MIT)',
     integration: 'TOKEN_MIT',
     capability: 'charge_with_token_mit',
     needsCard: false,
     needsAmount: true,
     needsToken: true,
-    help: 'Merchant-initiated charge, no customer present.',
+    help:
+      'Two merchant round trips — session generation then pay-with-token, ' +
+      'each signed with a different algorithm. Completes server-to-server ' +
+      'with no customer present.',
   },
 ]
 
@@ -176,7 +187,7 @@ export default function NewTransaction({ flags }) {
       else if (operationKey === 'auth')
         response = await api.directAuth(gatewayCode, { ...withAmount, card: cardPayload })
       else if (operationKey === 'tokenize')
-        response = await api.tokenize(gatewayCode, { ...base, card: cardPayload })
+        response = await api.tokenize(gatewayCode, { ...base, currency })
       else if (operationKey === 'cit')
         response = await api.chargeCit(gatewayCode, {
           ...withAmount, token_reference: tokenReference,
@@ -191,8 +202,11 @@ export default function NewTransaction({ flags }) {
       // transaction just created.
       setIdempotencyKey(newIdempotencyKey())
 
+      // A session-based flow leaves something for the operator to do, so stay
+      // on this page and show it. A completed server-to-server charge has
+      // nothing left to do, so go straight to its call trail.
       const transaction = response.transaction ?? response
-      if (!response.redirect_url && transaction?.id) {
+      if (!response.session_id && transaction?.id) {
         navigate(`/transactions/${transaction.id}`)
       }
     } catch (submitError) {
@@ -219,20 +233,34 @@ export default function NewTransaction({ flags }) {
 
       <ErrorNotice error={error} />
 
-      {result?.redirect_url && (
+      {result?.session_id && (
         <Notice tone="good">
-          Hosted checkout session created.{' '}
-          <a href={result.redirect_url} target="_blank" rel="noreferrer">
-            Open the payment page
-          </a>
-          {result.redirect_field && (
-            <span className="small muted">
-              {' '}(redirect URL found under <code>{result.redirect_field}</code>)
-            </span>
+          <div>
+            <strong>Session created.</strong>{' '}
+            {result.redirect_url ? (
+              <>
+                <a href={result.redirect_url} target="_blank" rel="noreferrer">
+                  Open the payment page
+                </a>
+                {result.redirect_field && (
+                  <span className="small muted">
+                    {' '}(redirect URL found under <code>{result.redirect_field}</code>)
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="mono small">{result.session_id}</span>
+            )}
+          </div>
+          {result.next_step && (
+            <div className="small" style={{ marginTop: 6 }}>
+              {result.next_step}
+            </div>
           )}
-          . The transaction stays pending until the callback or an order query
-          settles it —{' '}
-          <a href={`/transactions/${result.transaction.id}`}>view it</a>.
+          <div className="small" style={{ marginTop: 6 }}>
+            The transaction stays pending until the callback settles it —{' '}
+            <a href={`/transactions/${result.transaction.id}`}>view its call trail</a>.
+          </div>
         </Notice>
       )}
 
@@ -291,16 +319,25 @@ export default function NewTransaction({ flags }) {
           </Notice>
         )}
 
-        {operation?.needsAmount && (
+        {(operation?.needsAmount || operation?.needsCurrency) && (
           <div className="row">
-            <Field label="Amount">
-              <input
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-                inputMode="decimal"
-              />
-            </Field>
-            <Field label="Currency">
+            {operation?.needsAmount && (
+              <Field label="Amount">
+                <input
+                  value={amount}
+                  onChange={(event) => setAmount(event.target.value)}
+                  inputMode="decimal"
+                />
+              </Field>
+            )}
+            <Field
+              label="Currency"
+              hint={
+                operation?.needsCurrency && !operation?.needsAmount
+                  ? 'Nothing is charged, but the currency is part of the signed request.'
+                  : undefined
+              }
+            >
               <select value={currency} onChange={(event) => setCurrency(event.target.value)}>
                 {['SAR', 'AED', 'EGP', 'USD', 'EUR', 'KWD', 'BHD', 'QAR'].map((code) => (
                   <option key={code} value={code}>{code}</option>

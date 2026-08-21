@@ -147,6 +147,11 @@ class PaymentResult(BaseResult):
     #: Set when the gateway requires the payer to complete a 3DS challenge in a
     #: browser before the payment can proceed.
     challenge_url: Optional[str] = None
+    #: Set when the payment cannot complete server-side and needs the customer
+    #: to finish it on the gateway's hosted page. Carrying the session id
+    #: matters for gateways whose hosted page is opened by a JavaScript SDK
+    #: from a session id rather than by redirecting to a URL.
+    session_id: Optional[str] = None
 
 
 @dataclass(slots=True)
@@ -165,12 +170,21 @@ class HPPSessionResult(BaseResult):
 class TokenResult(BaseResult):
     status: TransactionStatus = TransactionStatus.PENDING
     token_reference: Optional[str] = None
-    #: Separate consent/agreement identifier where the gateway issues one.
+    #: Consent/agreement identifier. For Geidea this is merchant-generated at
+    #: tokenization and must be replayed verbatim on every later
+    #: merchant-initiated charge, so it is carried on the result and stored.
     agreement_reference: Optional[str] = None
     card: Optional[CardDetails] = None
     gateway_transaction_id: Optional[str] = None
     error_code: Optional[str] = None
     error_message: Optional[str] = None
+    #: Session the customer must complete before a token exists. A save-card
+    #: flow is not a server-to-server call that returns a token: it returns a
+    #: session, the customer enters a card on the gateway's page, and the token
+    #: arrives later on the callback.
+    session_id: Optional[str] = None
+    redirect_url: Optional[str] = None
+    redirect_field: Optional[str] = None
 
 
 @dataclass(slots=True)

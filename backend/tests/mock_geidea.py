@@ -168,6 +168,65 @@ def build_mock_app() -> FastAPI:
             }
         })
 
+    @app.post("/payment-intent/api/v2/direct/session/saveCard")
+    async def save_card_session(request: Request):
+        body = await record("save_card_session", request)
+        failure = _maybe_fail("save_card_session")
+        if failure is not None:
+            return failure
+        if not _auth_ok(request):
+            return Response(content='{"responseCode":"401"}', status_code=401,
+                            media_type="application/json")
+        body = body or {}
+        for required in ("currency", "merchantReferenceId", "signature", "timeStamp"):
+            if required not in body:
+                return {"responseCode": DECLINE,
+                        "responseMessage": f"missing {required}"}
+        session_id = f"sess_{uuid.uuid4().hex[:16]}"
+        state.sessions[session_id] = dict(body)
+        return _ok({
+            "session": {
+                "id": session_id,
+                "amount": 1,
+                "currency": body.get("currency"),
+                "status": "Initiated",
+                "paymentOperation": "SaveCard",
+                "cardOnFile": True,
+                "cofAgreement": body.get("cofAgreement"),
+                "tokenId": None,
+            }
+        })
+
+    @app.post("/pgw/api/v2/direct/pay/token")
+    async def pay_with_token(request: Request):
+        body = await record("pay_with_token", request) or {}
+        failure = _maybe_fail("pay_with_token")
+        if failure is not None:
+            return failure
+        # Assert the adapter sends exactly what the MIT doc specifies,
+        # including the lowercase-i "sessionid" its sample uses.
+        for required in ("sessionid", "initiatedBy", "agreementId",
+                         "agreementType", "signature"):
+            if required not in body:
+                return {"responseCode": DECLINE,
+                        "responseMessage": f"missing {required}"}
+        if body.get("initiatedBy") != "Merchant":
+            return {"responseCode": DECLINE,
+                    "responseMessage": "initiatedBy must be Merchant for MIT"}
+
+        session = state.sessions.get(str(body.get("sessionid")), {})
+        order = Order(
+            order_id=f"ord_{uuid.uuid4().hex[:16]}",
+            merchant_reference=str(session.get("merchantReferenceId", "")),
+            amount=str(session.get("amount", "0")),
+            currency=str(session.get("currency", "SAR")),
+            status="Paid",
+            operation="Pay",
+        )
+        order.captured = float(order.amount or 0)
+        state.orders[order.order_id] = order
+        return _ok(_order_payload(order))
+
     @app.post("/pgw/api/v6/direct/authenticate/initiate")
     async def initiate(request: Request):
         await record("initiate_authentication", request)

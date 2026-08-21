@@ -280,52 +280,60 @@ async def test_benchmark_minimum_interval_is_enforced(db, geidea, monkeypatch):
 # Unsupported / undocumented operations
 # ---------------------------------------------------------------------------
 
-async def test_undocumented_operations_raise_rather_than_guessing(db, geidea, mock_gateway):
+async def test_cancel_order_still_refuses_rather_than_guessing(db, geidea, mock_gateway):
     """
-    §0.2: an unverified request shape is never sent to a real payment gateway.
+    §0.2 still holds for what is still undocumented.
 
-    Tokenize, CIT, MIT and webhook verification have no documented shape in
-    this build, so they must refuse with a typed error naming the doc page --
-    not send a plausible-looking guess.
+    Tokenize, CIT, MIT and webhook verification were blocked until their
+    documentation was retrieved (docs/geidea/). Cancel Order has not been, so it
+    is still absent from the capability set -- the rule is about evidence, not
+    about a one-time exemption that expires.
     """
-    from app.gateways.errors import DocumentationRequiredError
+    from app.gateways.geidea import endpoints as ep
 
-    context = GatewayContext(
-        gateway_id=geidea.id, gateway_code="geidea", display_name="Geidea",
-        credentials={"public_key": "pk", "api_password": "pw"},
-        config={"api_base": mock_gateway}, timeout_seconds=5.0,
-    )
-    adapter = GeideaAdapter(context)
-    order = OrderContext(merchant_reference="X", amount_minor=100, currency="SAR")
-
-    with pytest.raises(DocumentationRequiredError) as exc:
-        await adapter.tokenize(CARD)
-    assert "save-card" in exc.value.doc_url
-
-    with pytest.raises(DocumentationRequiredError) as exc:
-        await adapter.charge_with_token_mit(object(), order)
-    assert "merchant-initiated-mit" in exc.value.doc_url
-
-    with pytest.raises(DocumentationRequiredError):
-        await adapter.charge_with_token_cit(object(), order)
-
-    with pytest.raises(DocumentationRequiredError) as exc:
-        await adapter.verify_webhook({}, b"{}")
-    assert "sample-callback-responses" in exc.value.doc_url
+    assert ep.CANCEL_ORDER.provenance is ep.Provenance.UNDOCUMENTED
+    assert ep.CANCEL_ORDER.blocks_operation is True
 
 
-def test_capabilities_exclude_the_undocumented_operations():
-    """The UI hides what the adapter cannot do, driven by this set (§3)."""
+def test_capabilities_match_what_the_documentation_supports():
+    """
+    The four operations blocked for want of documentation are now implemented.
+
+    Each is backed by a page committed under docs/geidea/, so this asserts the
+    capability set tracks the evidence rather than tracking optimism.
+    """
     from app.gateways.base import Capability
 
     caps = GeideaAdapter.capabilities
-    assert Capability.TOKENIZE not in caps
-    assert Capability.CHARGE_WITH_TOKEN_CIT not in caps
-    assert Capability.CHARGE_WITH_TOKEN_MIT not in caps
-    assert Capability.VERIFY_WEBHOOK not in caps
-    # And the ones that are implemented are declared.
-    assert Capability.DIRECT_API_SALE in caps
-    assert Capability.MULTIPLE_PARTIAL_CAPTURES in caps
+    for capability in (
+        Capability.TOKENIZE,
+        Capability.CHARGE_WITH_TOKEN_CIT,
+        Capability.CHARGE_WITH_TOKEN_MIT,
+        Capability.VERIFY_WEBHOOK,
+        Capability.DIRECT_API_SALE,
+        Capability.MULTIPLE_PARTIAL_CAPTURES,
+    ):
+        assert capability in caps, capability
+
+
+def test_base_signature_gap_is_reported_but_does_not_block():
+    """
+    The one signature formula still missing is flagged, not hidden.
+
+    It is advisory rather than blocking because it is a computed value attached
+    to a call, not a call of its own -- and because a wrong signature yields a
+    clean, fully logged rejection rather than a wrong payment.
+    """
+    gaps = {gap["step_name"]: gap for gap in GeideaAdapter.doc_gaps()}
+
+    assert "base_signature" in gaps
+    assert gaps["base_signature"]["provenance"] == "inferred"
+    assert gaps["base_signature"]["blocks_operation"] == "False"
+    assert "geidea-checkout-v2" in gaps["base_signature"]["doc_url"]
+
+    # And the operations whose docs were retrieved are no longer reported.
+    for closed in ("tokenize", "pay_with_token", "verify_webhook", "save_card_session"):
+        assert closed not in gaps or gaps[closed]["blocks_operation"] == "False"
 
 
 async def test_unsupported_operation_is_typed_not_an_attribute_error(db, geidea):
