@@ -275,13 +275,18 @@ class Transaction(Base):
         cascade="all, delete-orphan",
         order_by="ApiCallLog.sequence_number",
     )
-    children: Mapped[List["Transaction"]] = relationship(
-        back_populates="parent", remote_side=lambda: [Transaction.id],
-        cascade="save-update",
-    )
+    # Self-referential: capture -> auth, refund -> capture/sale. remote_side
+    # belongs on the many-to-one side only; putting it on both makes SQLAlchemy
+    # read the pair as two many-to-one relationships pointing at each other.
     parent: Mapped[Optional["Transaction"]] = relationship(
-        back_populates="children", remote_side=lambda: [Transaction.id],
+        back_populates="children",
+        remote_side=lambda: [Transaction.id],
         foreign_keys=lambda: [Transaction.parent_transaction_id],
+    )
+    children: Mapped[List["Transaction"]] = relationship(
+        back_populates="parent",
+        foreign_keys=lambda: [Transaction.parent_transaction_id],
+        cascade="save-update",
     )
 
     __table_args__ = (

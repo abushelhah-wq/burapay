@@ -29,7 +29,7 @@ import json
 from typing import Any, Mapping, Optional, Protocol
 
 import httpx
-from sqlalchemy import update
+from sqlalchemy import func, select, update
 
 from app.db import session_scope
 from app.gateways.errors import (
@@ -120,6 +120,33 @@ class GatewayHTTPClient:
     async def __aenter__(self) -> "GatewayHTTPClient":
         self._client = httpx.AsyncClient(verify=self._verify, follow_redirects=False)
         return self
+
+    async def _ensure_sequence_base(self) -> None:
+        """
+        Continue the transaction's existing call sequence rather than restart it.
+
+        ``sequence_number`` is the order of a call *within the transaction's
+        flow* (§2), and a transaction can be touched by more than one client:
+        a reconciliation query after a timeout, or an on-demand order query,
+        both belong to the same flow. Starting each client at 1 would collide
+        with the unique (transaction_id, sequence_number) constraint and, worse,
+        would make the audit trail claim two different calls were both first.
+        """
+        if self._sequence or self.transaction_id is None:
+            return
+        try:
+            async with session_scope() as session:
+                highest = await session.scalar(
+                    select(func.max(ApiCallLog.sequence_number)).where(
+                        ApiCallLog.transaction_id == self.transaction_id
+                    )
+                )
+            self._sequence = int(highest or 0)
+        except Exception:
+            logger.exception(
+                "could not determine the existing call sequence; starting from 0",
+                extra={"transaction_id": self.transaction_id},
+            )
 
     async def __aexit__(self, *exc_info: Any) -> None:
         if self._client is not None:
@@ -275,6 +302,7 @@ class GatewayHTTPClient:
                 "GatewayHTTPClient must be used as an async context manager."
             )
 
+        await self._ensure_sequence_base()
         self._sequence += 1
         sequence_number = self._sequence
         effective_timeout = (

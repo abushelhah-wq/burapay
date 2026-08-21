@@ -33,8 +33,8 @@ from typing import Any, Mapping, Optional
 
 from app.gateways.base import Capability, GatewayAdapter, GatewayContext, WebhookEvent
 from app.gateways.errors import (
-    DocumentationRequiredError, GatewayDeclined, InvalidTransactionState,
-    MerchantCapabilityError,
+    DocumentationRequiredError, GatewayDeclined, GatewayHTTPStatusError,
+    InvalidTransactionState, MerchantCapabilityError,
 )
 from app.gateways.geidea import endpoints as ep
 from app.gateways.geidea.signing import (
@@ -190,6 +190,24 @@ class GeideaAdapter(GatewayAdapter):
         return endpoint.format(self.base_url, **params)
 
     # -- response handling -------------------------------------------------
+
+    def _parse(self, call: Any, step: str) -> dict[str, Any]:
+        """
+        Turn a completed call into a validated body, or raise.
+
+        §6 requires non-2xx responses to be a distinct failure class from a
+        business decline, so this checks the HTTP status first. Calls are made
+        with ``raise_on_status=False`` so the failing body is available here and
+        gets attached to the error rather than discarded -- the body is where a
+        gateway explains itself, and a bare "HTTP 502" is not actionable.
+        """
+        if not call.ok:
+            raise GatewayHTTPStatusError(
+                f"Geidea {step} returned HTTP {call.status_code}",
+                status_code=int(call.status_code or 0),
+                body=call.response_json,
+            )
+        return self._check_response_code(call.response_json, step)
 
     def _check_response_code(self, body: Any, step: str) -> dict[str, Any]:
         """
@@ -374,13 +392,7 @@ class GeideaAdapter(GatewayAdapter):
             json_body=self._session_body(order, **overrides),
             raise_on_status=False,
         )
-        if not call.ok:
-            self._check_response_code(call.response_json, "create session")
-            raise GatewayDeclined(
-                f"Geidea create session returned HTTP {call.status_code}",
-                detail=call.response_json,
-            )
-        return self._check_response_code(call.response_json, "create session")
+        return self._parse(call, "create session")
 
     # -- (a) hosted checkout ----------------------------------------------
 
@@ -474,9 +486,7 @@ class GeideaAdapter(GatewayAdapter):
                 json_body={"sessionId": session_id, "paymentMethod": card_payload},
                 raise_on_status=False,
             )
-            initiate_body = self._check_response_code(
-                initiate_call.response_json, "initiate authentication"
-            )
+            initiate_body = self._parse(initiate_call, "initiate authentication")
 
             if self.force_full_3ds or self._challenge_expected(initiate_body):
                 await client.call(
@@ -502,7 +512,7 @@ class GeideaAdapter(GatewayAdapter):
                 },
                 raise_on_status=False,
             )
-            pay_body = self._check_response_code(pay_call.response_json, "pay")
+            pay_body = self._parse(pay_call, "pay")
 
             status, _raw_status = self._status(pay_body)
             return PaymentResult(
@@ -581,10 +591,15 @@ class GeideaAdapter(GatewayAdapter):
                 json_body=body,
                 raise_on_status=False,
             )
-            parsed = self._check_response_code(call.response_json, "capture")
-            status, _ = self._status(parsed)
+            parsed = self._parse(call, "capture")
+            # The *capture* succeeded if the response code says so -- which is
+            # what _check_response_code already established, since it raises
+            # otherwise. Do not read the order's aggregate status here: an
+            # order that is partially captured is not a pending capture, and
+            # mapping the order's state onto this operation's row would leave a
+            # completed partial capture sitting in PENDING forever.
             return PaymentResult(
-                calls=client.calls, raw=parsed, status=status,
+                calls=client.calls, raw=parsed, status=TransactionStatus.SUCCESS,
                 amount_minor=amount, currency=currency,
                 gateway_order_id=self._order_id(parsed) or str(order_id),
                 gateway_transaction_id=self._transaction_id(parsed),
@@ -660,10 +675,10 @@ class GeideaAdapter(GatewayAdapter):
                 json_body=body,
                 raise_on_status=False,
             )
-            parsed = self._check_response_code(call.response_json, "refund")
-            status, _ = self._status(parsed)
+            parsed = self._parse(call, "refund")
+            # As with capture: this row records the refund, not the order.
             return PaymentResult(
-                calls=client.calls, raw=parsed, status=status,
+                calls=client.calls, raw=parsed, status=TransactionStatus.SUCCESS,
                 amount_minor=amount, currency=currency,
                 gateway_order_id=self._order_id(parsed) or str(order_id),
                 gateway_transaction_id=self._transaction_id(parsed),
@@ -703,10 +718,10 @@ class GeideaAdapter(GatewayAdapter):
                 json_body={"orderId": str(order_id)},
                 raise_on_status=False,
             )
-            parsed = self._check_response_code(call.response_json, "void")
-            status, _ = self._status(parsed)
+            parsed = self._parse(call, "void")
+            # As with capture: this row records the void, not the order.
             return PaymentResult(
-                calls=client.calls, raw=parsed, status=status,
+                calls=client.calls, raw=parsed, status=TransactionStatus.SUCCESS,
                 amount_minor=getattr(transaction, "amount_minor", None),
                 currency=getattr(transaction, "currency", None),
                 gateway_order_id=self._order_id(parsed) or str(order_id),
@@ -792,7 +807,7 @@ class GeideaAdapter(GatewayAdapter):
                 url=self._url(ep.ORDER_QUERY, order_id=str(order_id)),
                 raise_on_status=False,
             )
-            parsed = self._check_response_code(call.response_json, "order query")
+            parsed = self._parse(call, "order query")
             status, raw_status = self._status(parsed)
             return OrderStatusResult(
                 calls=client.calls,
