@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
+from app.api.v1.three_ds import FRAMABLE_HEADER
 from app.api.v1.router import api_router
 from app.api.webhooks import router as webhooks_router
 from app.core.config import settings
@@ -121,7 +122,14 @@ async def request_context(request: Request, call_next):
     response.headers["X-Request-ID"] = request_id
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    response.headers.setdefault("X-Frame-Options", "DENY")
+    # Framing is denied everywhere except the handful of routes that opt out with the
+    # marker header — today only the gateway return leg, which a hosted checkout
+    # mounted as a script navigates *inside its own iframe*. The marker is internal and
+    # never reaches a client.
+    if FRAMABLE_HEADER in response.headers:
+        del response.headers[FRAMABLE_HEADER]
+    else:
+        response.headers.setdefault("X-Frame-Options", "DENY")
     if settings.public_base_url.startswith("https://"):
         response.headers.setdefault("Strict-Transport-Security",
                                     "max-age=31536000; includeSubDomains")

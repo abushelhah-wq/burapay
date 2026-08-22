@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List
 import httpx
 import pytest
 
+from app.core.errors import GatewayError
 from app.gateways.base import Card, PaymentRequest
 from app.gateways.http import InstrumentedClient
 from app.gateways.registry import ADAPTERS, build_adapter
@@ -1139,8 +1140,18 @@ class TestHyperPayThreeDsConfiguration:
         values.update(extra)
         return build_adapter("hyperpay", values)
 
-    def _routes(self, body: Dict[str, Any]):
-        return route({"/v1/payments": httpx.Response(200, json=body)})
+    #: What OPPWA actually answers for this rejection: a 4xx *with* a full result body.
+    REJECTION = {
+        "id": "8ac7a4a1a023f58f01a029ca48514ad0", "paymentType": "DB",
+        "paymentBrand": "VISA", "merchantTransactionId": "burapay-9543d94fceec446e",
+        "result": {"code": "100.390.106",
+                   "description": "Transaction rejected because of error in "
+                                  "3DSecure configuration"},
+        "resultDetails": {"clearingInstituteName": "SAIB MPGS"},
+    }
+
+    def _routes(self, body: Dict[str, Any], status: int = 200):
+        return route({"/v1/payments": httpx.Response(status, json=body)})
 
     async def test_the_config_rejection_says_it_is_an_account_setting(self):
         """100.390.106 is rejected before the issuer is contacted. No payload fixes it."""
@@ -1182,4 +1193,51 @@ class TestHyperPayThreeDsConfiguration:
         assert "challenge" in body
         # The shopper has to have somewhere to come back to.
         assert "shopperResultUrl" in body
+        await client.client.aclose()
+
+    async def test_a_rejection_sent_as_http_400_is_an_outcome_not_a_transport_failure(self):
+        """OPPWA answers this one with a 400 and a complete result body.
+
+        Treating the status as the verdict threw the body away: the caller got raw
+        JSON in an exception message, ``result.code`` never reached the call log, and
+        a decline was recorded as a platform error.
+        """
+        adapter = self.adapter()
+        client = client_for(adapter, self._routes(self.REJECTION, status=400))
+        result = await adapter.process_direct_payment(client, request_for())
+
+        assert result.status is TransactionStatus.DECLINED
+        assert result.gateway_code == "100.390.106"
+        message = result.gateway_message or ""
+        assert "SAIB MPGS" in message
+        assert "not configured for this entity" in message
+        # The whole point: an explanation, not a JSON dump.
+        assert "merchantTransactionId" not in message
+        await client.client.aclose()
+
+    async def test_the_400_rejection_reaches_the_call_log(self):
+        adapter = self.adapter()
+        client = client_for(adapter, self._routes(self.REJECTION, status=400))
+        await adapter.process_direct_payment(client, request_for())
+
+        measurement = client.measurements[-1]
+        assert measurement.gateway_response_code == "100.390.106"
+        assert measurement.success is False
+        await client.client.aclose()
+
+    async def test_an_error_with_no_result_body_still_raises(self):
+        """A proxy's HTML error page is a transport failure and must stay one."""
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/v1/payments": httpx.Response(502, text="<html>Bad Gateway</html>")}))
+        with pytest.raises(GatewayError):
+            await adapter.process_direct_payment(client, request_for())
+        await client.client.aclose()
+
+    async def test_a_json_error_without_a_result_code_still_raises(self):
+        adapter = self.adapter()
+        client = client_for(adapter, route({
+            "/v1/payments": httpx.Response(401, json={"message": "invalid token"})}))
+        with pytest.raises(GatewayError):
+            await adapter.process_direct_payment(client, request_for())
         await client.client.aclose()

@@ -537,6 +537,47 @@ class TestTransactionLifecycle:
         assert started["status"] == "PENDING"
         assert started["redirect_url"]
 
+    async def test_the_return_leg_escapes_the_gateways_frame(
+            self, client: AsyncClient, auth_headers: dict):
+        """A checkout mounted as a script returns the browser inside its own iframe.
+
+        A redirect there only moves the frame to a page ``X-Frame-Options: DENY``
+        refuses to render, so the cardholder sees an empty box while the payment has
+        actually succeeded. The return leg answers with a document that climbs out to
+        the top window instead — and must not carry the header that would stop the
+        browser rendering *it*.
+        """
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers, integration_type="hpp")
+        transaction_id = started["transaction_id"]
+
+        response = await client.get(f"/v1/transactions/{transaction_id}/return",
+                                    follow_redirects=False)
+        assert response.status_code == 200
+        assert "x-frame-options" not in response.headers
+        # The internal marker is stripped on the way out.
+        assert "x-burapay-framable" not in response.headers
+        assert "window.top" in response.text
+        assert f"/transactions/{transaction_id}" in response.text
+        # Still works with script off, and still offers something to click.
+        assert "http-equiv=\"refresh\"" in response.text
+        assert "target=\"_top\"" in response.text
+
+    async def test_every_other_route_still_denies_framing(
+            self, client: AsyncClient, auth_headers: dict):
+        """The opt-out is one route, not a hole in the default."""
+        for path in ("/v1/gateways", "/v1/transactions", "/health"):
+            response = await client.get(path, headers=auth_headers)
+            assert response.headers.get("x-frame-options") == "DENY", path
+
+    async def test_an_unknown_transaction_also_gets_a_breakout_page(
+            self, client: AsyncClient):
+        response = await client.get("/v1/transactions/nope/return",
+                                    follow_redirects=False)
+        assert response.status_code == 200
+        assert "unknown-transaction" in response.text
+        assert "x-frame-options" not in response.headers
+
     async def test_hpp_return_leg_completes_the_transaction(
             self, client: AsyncClient, auth_headers: dict):
         await configure_mockpay(client, auth_headers)
@@ -545,7 +586,8 @@ class TestTransactionLifecycle:
 
         response = await client.get(f"/v1/transactions/{transaction_id}/return",
                                     follow_redirects=False)
-        assert response.status_code == 303
+        assert response.status_code == 200
+        assert f"/transactions/{transaction_id}" in response.text
 
         transaction = (await client.get(f"/v1/transactions/{transaction_id}",
                                         headers=auth_headers)).json()["transaction"]
@@ -646,7 +688,7 @@ class TestTransactionLifecycle:
         response = await client.get(
             f"/v1/transactions/{started['transaction_id']}/return",
             follow_redirects=False)
-        assert response.status_code == 303
+        assert response.status_code == 200
 
         detail = (await client.get(f"/v1/transactions/{started['transaction_id']}",
                                    headers=auth_headers)).json()

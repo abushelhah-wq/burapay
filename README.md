@@ -444,6 +444,66 @@ which is not a thing to benchmark by accident.
 `resultDetails` is now reported alongside `result.code` on every HyperPay outcome. On a
 rejection it is frequently the only part that says which end the problem is at.
 
+OPPWA delivers this particular rejection as **HTTP 400 with a complete result body**, and
+that used to be read as a transport failure — the raw JSON was dumped into an exception,
+`result.code` never reached the call log, and a decline was recorded as a platform error.
+A body carrying a `result.code` is now treated as an outcome whatever the status, so what
+you see is the explanation above rather than:
+
+```text
+HyperPay: create payment returned HTTP 400: {"id":"8ac7a4a1...","result":{"code":"100.390.106",...
+```
+
+A response with no `result.code` in it — a proxy's HTML error page, a 401 — is still a
+transport failure and still raises.
+
+### Console messages that are not bugs
+
+Three things show up in the browser console during a real 3DS run and none of them is
+this application misbehaving. They are recorded here because each one looks alarming
+and each one has already cost an afternoon.
+
+```text
+SecurityError: Failed to read the 'cookie' property from 'Document':
+The document is sandboxed and lacks the 'allow-same-origin' flag.
+    at CookieController.applyRules (document-start.js)
+```
+
+`document-start.js` is a **browser extension** content script — an ad blocker or cookie
+manager — injected into the 3DS challenge document. That document is deliberately served
+under `Content-Security-Policy: sandbox` *without* `allow-same-origin`, so somebody
+else's markup cannot read this application's cookies. The extension tries anyway and
+throws inside its own stack. Nothing of ours reads `document.cookie` there, the form
+still submits, and the error is the sandbox working exactly as intended. It disappears
+in a private window with extensions off.
+
+```text
+Framing 'https://mtf.gateway.mastercard.com/' violates the following
+report-only Content Security Policy directive: "frame-ancestors 'self'".
+The violation has been logged, but no further action has been taken.
+```
+
+Geidea's hosted checkout is MPGS underneath, and its script frames MPGS inside our page —
+that is how Geidea's checkout is designed to work. Mastercard's own policy on that page
+is **report-only**, so nothing is blocked; the browser logs it and carries on, as the
+message itself says. It is Mastercard reporting on Mastercard, and there is no header we
+can set on our origin that changes it.
+
+```text
+mtf.gateway.mastercard.com/callbackInterface/cspViolationReport
+Failed to load resource: net::ERR_BLOCKED_BY_CLIENT
+```
+
+`ERR_BLOCKED_BY_CLIENT` is always an extension. This is the ad blocker blocking
+Mastercard's attempt to *report* the violation above. Both lines have the same cause and
+neither affects the payment.
+
+What *was* a real bug in the same area: the return leg used to answer with a 303, and a
+checkout mounted as a script returns the browser inside its own iframe, where
+`X-Frame-Options: DENY` then refused to render the target — an empty box for a payment
+that had actually succeeded. The return leg now serves a small document that climbs out
+to the top window first, and is the one route that opts out of the framing header.
+
 ### Call Log
 
 Geidea answers a malformed request with `responseCode=100` "General error" and a detailed

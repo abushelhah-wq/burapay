@@ -26,6 +26,7 @@ when the automatic submit does not fire.
 from __future__ import annotations
 
 import html
+import json
 import re
 from typing import Optional
 
@@ -128,3 +129,61 @@ def no_form_document(markup: Optional[str], *, gateway: str,
     <pre>{excerpt}</pre>
   </div>
 </main>""")
+
+
+#: Marks a response the security middleware must not stamp ``X-Frame-Options`` onto.
+#: Stripped before the response leaves, so it never reaches a client.
+FRAMABLE_HEADER = "x-burapay-framable"
+
+
+def return_document(target: str) -> str:
+    """The page the gateway's browser lands on when it sends the cardholder back.
+
+    A hosted checkout that runs as a mounted script — Geidea's, which is MPGS
+    underneath — puts the provider's page in an iframe inside our own. The provider
+    then returns the browser to our return URL *inside that same frame*, and both this
+    application's responses and the front end's carry ``X-Frame-Options: DENY``, so
+    the browser refuses to render either one. The payment finishes server-side and the
+    cardholder is left looking at an empty box.
+
+    A redirect cannot fix that, because the redirect target is framed too. So the
+    return leg answers with this: a document that climbs out to the top-level window
+    before navigating. By the time it runs, the frame is on our own origin — the
+    provider navigated it here — so reaching ``window.top`` is same-origin and allowed.
+
+    Everything has a fallback. If ``window.top`` cannot be reached, it navigates the
+    frame itself; if script is off, a meta refresh runs; if that fails too, there is a
+    link to click. The page shows nothing but a line of text either way, because
+    nobody should ever see it for longer than one paint.
+    """
+    escaped = html.escape(target, quote=True)
+    # Every target this is called with is a path this application generated, but the
+    # cost of not depending on that is one replace: ``</script>`` inside a JSON string
+    # still ends the block as far as the HTML parser is concerned.
+    literal = json.dumps(target).replace("<", "\\u003c")
+    return _document("Payment complete", f"""
+<noscript><meta http-equiv="refresh" content="0;url={escaped}"></noscript>
+<main>
+  <div class="card">
+    <h1>Finishing up…</h1>
+    <p id="burapay-status">Taking you back to BuraPay.</p>
+    <p><a href="{escaped}" target="_top">Continue</a></p>
+  </div>
+</main>
+<script>
+  (function () {{
+    var target = {literal};
+    try {{
+      // Framed by the provider's hosted page: leave the frame, or the top window
+      // keeps showing the provider and the result is never seen.
+      if (window.top && window.top !== window.self) {{
+        window.top.location.replace(target);
+        return;
+      }}
+    }} catch (e) {{
+      // A cross-origin ancestor we cannot reach. Navigating in place at least shows
+      // something, and the link above still works.
+    }}
+    window.location.replace(target);
+  }})();
+</script>""")

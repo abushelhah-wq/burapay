@@ -9,13 +9,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user, require_admin, require_user
-from app.api.v1.three_ds import (FORM_PATTERN, challenge_document,
-                                 no_form_document)
+from app.api.v1.three_ds import (FORM_PATTERN, FRAMABLE_HEADER,
+                                 challenge_document, no_form_document,
+                                 return_document)
 from app.core.config import settings as app_settings
 from app.core.errors import BenchmarkError, NotConfigured, NotSupported
 from app.core.logging import get_logger
@@ -146,9 +147,31 @@ async def start_transaction(payload: StartTransactionRequest,
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
+def _return_response(target: str) -> HTMLResponse:
+    """Answer the gateway's return navigation with a page that escapes the frame.
+
+    Not a redirect. A hosted checkout mounted as a script — Geidea's, which is MPGS
+    underneath — returns the browser *inside its own iframe*, and a 303 only moves the
+    frame to a target that ``X-Frame-Options: DENY`` then refuses to render, leaving
+    the cardholder with an empty box. See :func:`return_document`.
+
+    ``X-Frame-Options`` is deliberately absent here, and the marker header tells the
+    security middleware not to add its default. That costs nothing: this route is
+    already unauthenticated by design — the gateway navigates to it carrying no
+    session — it holds no data worth framing for, and it does nothing an attacker
+    could not do by requesting the URL directly. Clickjacking needs a victim's click
+    on something that matters, and there is nothing here to click.
+    """
+    return HTMLResponse(return_document(target), headers={
+        FRAMABLE_HEADER: "1",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+    })
+
+
 @router.get("/{transaction_id}/return")
 async def hpp_return(transaction_id: str, request: Request,
-                     session: AsyncSession = Depends(get_session)) -> RedirectResponse:
+                     session: AsyncSession = Depends(get_session)) -> HTMLResponse:
     """Where the gateway sends the customer's browser back to.
 
     Serves both pauses: a hosted checkout the customer has finished, and a Direct
@@ -162,7 +185,7 @@ async def hpp_return(transaction_id: str, request: Request,
     """
     transaction = await session.get(Transaction, transaction_id)
     if transaction is None:
-        return RedirectResponse("/transactions?error=unknown-transaction", status_code=303)
+        return _return_response("/transactions?error=unknown-transaction")
 
     # The RETURN_URL_RECEIVED event is recorded by the completion service, which knows
     # the offset from the transaction's own start; recording it here as well would put
@@ -176,7 +199,7 @@ async def hpp_return(transaction_id: str, request: Request,
                               "transaction_id": transaction.id,
                               "operation": "return_leg", "status": "error",
                               "error": str(exc)[:300]})
-    return RedirectResponse(f"/transactions/{transaction.id}", status_code=303)
+    return _return_response(f"/transactions/{transaction.id}")
 
 
 @router.get("/{transaction_id}/hpp", response_model=HppHandoff)
