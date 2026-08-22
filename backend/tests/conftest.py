@@ -28,8 +28,9 @@ os.environ.setdefault("ENCRYPTION_KEY",
                       base64.urlsafe_b64encode(b"0123456789abcdef0123456789abcdef").decode())
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("PUBLIC_BASE_URL", "https://busrapay.test")
+os.environ.setdefault("BOOTSTRAP_ADMIN_USERNAME", "admin")
 os.environ.setdefault("BOOTSTRAP_ADMIN_EMAIL", "admin@busrapay.com")
-os.environ.setdefault("BOOTSTRAP_ADMIN_PASSWORD", "TestAdminPassword123")
+os.environ.setdefault("BOOTSTRAP_ADMIN_PASSWORD", "TestAdminPassword123!")
 # Keep runs fast: the production floor of one transaction every two seconds would make
 # a ten-transaction run take twenty seconds of wall clock in CI.
 os.environ.setdefault("BENCHMARK_MIN_INTERVAL_SECONDS", "0")
@@ -80,10 +81,29 @@ async def client(db_session) -> AsyncIterator[AsyncClient]:
         yield http
 
 
+#: Meets the complexity rules in ``app.core.security.validate_password``, which the
+#: bootstrap password does not have to but every password set through the API does.
+TEST_ADMIN_PASSWORD = "TestAdminPassword123!"
+
+
+@pytest.fixture(autouse=True)
+def reset_login_limiter():
+    """Clear the per-address rate limiter between tests.
+
+    It is process-global on purpose (see ``app.services.auth``), so a test that
+    deliberately fails a login twenty times would otherwise lock the next test out.
+    """
+    from app.services.auth import login_limiter
+
+    login_limiter.reset()
+    yield
+    login_limiter.reset()
+
+
 @pytest.fixture
 async def admin_token(client: AsyncClient) -> str:
     response = await client.post("/v1/auth/login", json={
-        "email": "admin@busrapay.com", "password": "TestAdminPassword123"})
+        "username": "admin", "password": TEST_ADMIN_PASSWORD})
     assert response.status_code == 200, response.text
     return response.json()["access_token"]
 
@@ -91,3 +111,22 @@ async def admin_token(client: AsyncClient) -> str:
 @pytest.fixture
 def auth_headers(admin_token: str) -> dict:
     return {"Authorization": f"Bearer {admin_token}"}
+
+
+@pytest.fixture
+async def user_headers(client: AsyncClient, auth_headers: dict) -> dict:
+    """Bearer headers for a non-administrator account.
+
+    Created through the API rather than the database, so the fixture also exercises
+    the path an administrator actually uses.
+    """
+    response = await client.post("/v1/users", headers=auth_headers, json={
+        "full_name": "Test User", "username": "test.user",
+        "email": "test.user@busrapay.com", "role": "USER",
+        "password": "RegularUserPass9!", "confirm_password": "RegularUserPass9!",
+        "status": "ACTIVE"})
+    assert response.status_code == 201, response.text
+    login = await client.post("/v1/auth/login", json={
+        "username": "test.user", "password": "RegularUserPass9!"})
+    assert login.status_code == 200, login.text
+    return {"Authorization": f"Bearer {login.json()['access_token']}"}

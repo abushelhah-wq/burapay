@@ -45,47 +45,360 @@ class TestHealth:
 class TestAuthentication:
     async def test_login_returns_a_token_and_the_user(self, client: AsyncClient):
         response = await client.post("/v1/auth/login", json={
-            "email": "admin@busrapay.com", "password": "TestAdminPassword123"})
+            "username": "admin", "password": "TestAdminPassword123!"})
         assert response.status_code == 200
         body = response.json()
-        assert body["access_token"] and body["user"]["role"] == "admin"
+        assert body["access_token"] and body["user"]["role"] == "ADMIN"
+        assert body["user"]["username"] == "admin"
+
+    async def test_email_is_accepted_as_the_login_handle(self, client: AsyncClient):
+        """Section 9, step 3: username *or* email."""
+        response = await client.post("/v1/auth/login", json={
+            "username": "admin@busrapay.com", "password": "TestAdminPassword123!"})
+        assert response.status_code == 200
+
+    async def test_login_sets_httponly_and_csrf_cookies(self, client: AsyncClient):
+        response = await client.post("/v1/auth/login", json={
+            "username": "admin", "password": "TestAdminPassword123!"})
+        cookies = response.headers.get_list("set-cookie")
+        session = next(c for c in cookies if c.startswith("burapay_token="))
+        csrf = next(c for c in cookies if c.startswith("burapay_csrf="))
+        assert "HttpOnly" in session and "SameSite=lax" in session
+        # The test settings use an https public base URL, so both cookies are Secure.
+        assert "Secure" in session and "Secure" in csrf
+        # The CSRF cookie must be readable by our own script — that is what makes the
+        # double-submit check possible.
+        assert "HttpOnly" not in csrf
+        assert response.json()["csrf_token"]
 
     async def test_wrong_password_is_rejected(self, client: AsyncClient):
         response = await client.post("/v1/auth/login", json={
-            "email": "admin@busrapay.com", "password": "wrong"})
+            "username": "admin", "password": "wrong"})
         assert response.status_code == 401
 
     async def test_unknown_and_wrong_password_are_indistinguishable(self, client: AsyncClient):
-        """Different messages would tell an attacker which addresses exist."""
+        """Different messages would tell an attacker which handles exist."""
         unknown = await client.post("/v1/auth/login", json={
-            "email": "nobody@busrapay.com", "password": "x"})
+            "username": "nobody", "password": "x"})
         wrong = await client.post("/v1/auth/login", json={
-            "email": "admin@busrapay.com", "password": "x"})
+            "username": "admin", "password": "x"})
         assert unknown.status_code == wrong.status_code == 401
         assert unknown.json()["detail"] == wrong.json()["detail"]
 
     async def test_protected_routes_require_authentication(self, client: AsyncClient):
         assert (await client.get("/v1/gateways")).status_code == 401
         assert (await client.get("/v1/transactions")).status_code == 401
+        assert (await client.get("/v1/users")).status_code == 401
+        assert (await client.get("/v1/audit-logs")).status_code == 401
 
-    async def test_viewer_cannot_configure_credentials(self, client: AsyncClient,
-                                                       auth_headers: dict):
-        created = await client.post("/v1/auth/users", headers=auth_headers, json={
-            "email": "viewer@busrapay.com", "password": "ViewerPassword123",
-            "role": "viewer"})
-        assert created.status_code == 201
+    async def test_logout_clears_the_session_cookie(self, client: AsyncClient,
+                                                    auth_headers: dict):
+        response = await client.post("/v1/auth/logout", headers=auth_headers)
+        assert response.status_code == 200
+        assert any('burapay_token=""' in c or "burapay_token=;" in c
+                   for c in response.headers.get_list("set-cookie"))
 
+    async def test_expired_token_is_refused(self, client: AsyncClient):
+        from app.core.security import create_access_token
+
+        stale = create_access_token("whoever", role="ADMIN", email="a@b.test",
+                                    expires_minutes=-1)
+        response = await client.get("/v1/users",
+                                    headers={"Authorization": f"Bearer {stale}"})
+        assert response.status_code == 401
+
+    async def test_repeated_failures_lock_the_account(self, client: AsyncClient,
+                                                      auth_headers: dict):
+        """Section 9: brute-force protection, and a locked account cannot sign in."""
+        await client.post("/v1/users", headers=auth_headers, json={
+            "full_name": "Locked Out", "username": "lockme",
+            "email": "lockme@busrapay.com", "role": "USER",
+            "password": "CorrectHorse9!", "confirm_password": "CorrectHorse9!"})
+
+        for _ in range(5):
+            failed = await client.post("/v1/auth/login",
+                                       json={"username": "lockme", "password": "nope"})
+            assert failed.status_code == 401
+
+        # Even the right password is now refused, with the same generic message.
+        blocked = await client.post("/v1/auth/login",
+                                    json={"username": "lockme", "password": "CorrectHorse9!"})
+        assert blocked.status_code == 401
+
+        listed = await client.get("/v1/users?search=lockme", headers=auth_headers)
+        assert listed.json()["items"][0]["status"] == "LOCKED"
+
+    async def test_login_is_rate_limited_per_address(self, client: AsyncClient):
+        """Section 9: a spray across many handles is stopped before any account is."""
+        from app.services.auth import login_limiter
+
+        # Behind the deployment's proxy this header is the client's real address, so
+        # it is also what the limiter buckets on.
+        attacker = {"X-Forwarded-For": "203.0.113.9"}
+        for _ in range(login_limiter.limit):
+            login_limiter.hit("203.0.113.9")
+
+        response = await client.post("/v1/auth/login", headers=attacker,
+                                     json={"username": "admin", "password": "x"})
+        assert response.status_code == 429
+        assert response.headers["retry-after"]
+
+        # A different address is unaffected: the limit is per client, not global.
+        other = await client.post("/v1/auth/login",
+                                  headers={"X-Forwarded-For": "203.0.113.10"},
+                                  json={"username": "admin", "password": "x"})
+        assert other.status_code == 401
+
+    async def test_cookie_authenticated_write_needs_the_csrf_token(self,
+                                                                   client: AsyncClient):
+        """A cookie the browser attaches automatically is not on its own authorization."""
         login = await client.post("/v1/auth/login", json={
-            "email": "viewer@busrapay.com", "password": "ViewerPassword123"})
-        viewer_headers = {"Authorization": f"Bearer {login.json()['access_token']}"}
+            "username": "admin", "password": "TestAdminPassword123!"})
+        body = login.json()
+        # Set by hand rather than left to the response: the real cookies carry
+        # ``Secure`` (the test settings use an https public URL), so httpx correctly
+        # refuses to send them back over the plain-http test transport.
+        client.cookies.set("burapay_token", body["access_token"])
+        client.cookies.set("burapay_csrf", body["csrf_token"])
 
-        # A viewer reads dashboards; only an admin holds credentials and runs tests.
-        forbidden = await client.put("/v1/gateways/mockpay/credentials",
-                                     headers=viewer_headers,
-                                     json={"environment": "sandbox", "values": {}})
-        assert forbidden.status_code == 403
+        without = await client.put("/v1/gateways/mockpay/credentials",
+                                   json={"environment": "sandbox", "values": {}})
+        assert without.status_code == 403
+
+        mismatched = await client.put("/v1/gateways/mockpay/credentials",
+                                      headers={"X-CSRF-Token": "not-the-token"},
+                                      json={"environment": "sandbox", "values": {}})
+        assert mismatched.status_code == 403
+
+        with_header = await client.put("/v1/gateways/mockpay/credentials",
+                                       headers={"X-CSRF-Token": body["csrf_token"]},
+                                       json={"environment": "sandbox", "values": {}})
+        assert with_header.status_code == 200
+
+        # Reading is unaffected: a GET changes nothing, so it needs no token.
+        assert (await client.get("/v1/gateways")).status_code == 200
+        client.cookies.clear()
+
+    async def test_bearer_requests_need_no_csrf_token(self, client: AsyncClient,
+                                                      auth_headers: dict):
+        """Nothing attaches a bearer header automatically, so there is nothing to forge."""
+        response = await client.put("/v1/gateways/mockpay/credentials",
+                                    headers=auth_headers,
+                                    json={"environment": "sandbox", "values": {}})
+        assert response.status_code == 200
+
+
+class TestUserManagement:
+    async def test_admin_creates_a_user_and_it_appears_in_the_list(
+            self, client: AsyncClient, auth_headers: dict):
+        created = await client.post("/v1/users", headers=auth_headers, json={
+            "full_name": "John Smith", "username": "john.smith",
+            "email": "john@example.com", "role": "USER",
+            "password": "SomethingStrong9!", "confirm_password": "SomethingStrong9!",
+            "status": "ACTIVE"})
+        assert created.status_code == 201, created.text
+        body = created.json()
+        assert body["username"] == "john.smith" and body["role"] == "USER"
+        assert body["created_by_username"] == "admin"
+        # A password never comes back, in any form.
+        assert "password" not in created.text and "hashed" not in created.text
+
+        listed = await client.get("/v1/users", headers=auth_headers)
+        assert {item["username"] for item in listed.json()["items"]} == {"admin", "john.smith"}
+
+    async def test_duplicate_username_and_email_are_refused(self, client: AsyncClient,
+                                                            auth_headers: dict):
+        payload = {"username": "dupe", "email": "dupe@example.com", "role": "USER",
+                   "password": "SomethingStrong9!"}
+        assert (await client.post("/v1/users", headers=auth_headers,
+                                  json=payload)).status_code == 201
+        again = await client.post("/v1/users", headers=auth_headers, json=payload)
+        assert again.status_code == 409
+
+        other_email = await client.post("/v1/users", headers=auth_headers, json={
+            **payload, "username": "dupe2"})
+        assert other_email.status_code == 409
+
+    async def test_weak_password_and_mismatch_are_refused(self, client: AsyncClient,
+                                                          auth_headers: dict):
+        weak = await client.post("/v1/users", headers=auth_headers, json={
+            "username": "weak", "email": "weak@example.com", "password": "password"})
+        assert weak.status_code == 422
+
+        mismatch = await client.post("/v1/users", headers=auth_headers, json={
+            "username": "mismatch", "email": "mismatch@example.com",
+            "password": "SomethingStrong9!", "confirm_password": "SomethingElse9!"})
+        assert mismatch.status_code == 422
+
+    async def test_filters_narrow_the_list(self, client: AsyncClient, auth_headers: dict):
+        for name, username, role in (("Alice Adams", "alice", "USER"),
+                                     ("Bob Brown", "bob", "ADMIN")):
+            await client.post("/v1/users", headers=auth_headers, json={
+                "full_name": name, "username": username,
+                "email": f"{username}@example.com", "role": role,
+                "password": "SomethingStrong9!"})
+
+        by_role = await client.get("/v1/users?role=ADMIN", headers=auth_headers)
+        assert {i["username"] for i in by_role.json()["items"]} == {"admin", "bob"}
+
+        by_name = await client.get("/v1/users?name=alice", headers=auth_headers)
+        assert [i["username"] for i in by_name.json()["items"]] == ["alice"]
+
+        by_search = await client.get("/v1/users?search=brown", headers=auth_headers)
+        assert [i["username"] for i in by_search.json()["items"]] == ["bob"]
+
+    async def test_disable_then_enable_round_trip(self, client: AsyncClient,
+                                                  auth_headers: dict):
+        created = await client.post("/v1/users", headers=auth_headers, json={
+            "username": "temp", "email": "temp@example.com",
+            "password": "SomethingStrong9!"})
+        user_id = created.json()["id"]
+
+        disabled = await client.post(f"/v1/users/{user_id}/disable", headers=auth_headers)
+        assert disabled.json()["status"] == "INACTIVE"
+
+        # An inactive account cannot sign in (section 10).
+        refused = await client.post("/v1/auth/login", json={
+            "username": "temp", "password": "SomethingStrong9!"})
+        assert refused.status_code == 401
+
+        enabled = await client.post(f"/v1/users/{user_id}/enable", headers=auth_headers)
+        assert enabled.json()["status"] == "ACTIVE"
+        assert (await client.post("/v1/auth/login", json={
+            "username": "temp", "password": "SomethingStrong9!"})).status_code == 200
+
+    async def test_admin_resets_a_password(self, client: AsyncClient, auth_headers: dict):
+        created = await client.post("/v1/users", headers=auth_headers, json={
+            "username": "forgetful", "email": "forgetful@example.com",
+            "password": "SomethingStrong9!"})
+        user_id = created.json()["id"]
+
+        reset = await client.post(f"/v1/users/{user_id}/reset-password",
+                                  headers=auth_headers,
+                                  json={"new_password": "BrandNewSecret9!",
+                                        "confirm_password": "BrandNewSecret9!"})
+        assert reset.status_code == 200
+        # The response says what happened, never what the password is.
+        assert "BrandNewSecret9!" not in reset.text
+
+        assert (await client.post("/v1/auth/login", json={
+            "username": "forgetful", "password": "SomethingStrong9!"})).status_code == 401
+        assert (await client.post("/v1/auth/login", json={
+            "username": "forgetful", "password": "BrandNewSecret9!"})).status_code == 200
+
+    async def test_edit_changes_name_email_role_and_status(self, client: AsyncClient,
+                                                           auth_headers: dict):
+        created = await client.post("/v1/users", headers=auth_headers, json={
+            "full_name": "Before", "username": "editable",
+            "email": "before@example.com", "password": "SomethingStrong9!"})
+        user_id = created.json()["id"]
+
+        updated = await client.patch(f"/v1/users/{user_id}", headers=auth_headers, json={
+            "full_name": "After", "email": "after@example.com", "role": "ADMIN",
+            "status": "INACTIVE"})
+        assert updated.status_code == 200
+        body = updated.json()
+        assert body["full_name"] == "After" and body["email"] == "after@example.com"
+        assert body["role"] == "ADMIN" and body["status"] == "INACTIVE"
+
+    async def test_an_admin_cannot_disable_or_demote_themselves(self, client: AsyncClient,
+                                                                auth_headers: dict):
+        me = await client.get("/v1/auth/me", headers=auth_headers)
+        my_id = me.json()["id"]
+        assert (await client.post(f"/v1/users/{my_id}/disable",
+                                  headers=auth_headers)).status_code == 400
+        assert (await client.patch(f"/v1/users/{my_id}", headers=auth_headers,
+                                   json={"role": "USER"})).status_code == 400
+
+    async def test_last_login_is_recorded(self, client: AsyncClient, auth_headers: dict,
+                                          user_headers: dict):
+        listed = await client.get("/v1/users?username=test.user", headers=auth_headers)
+        assert listed.json()["items"][0]["last_login_at"] is not None
+
+    async def test_a_normal_user_cannot_reach_user_management(self, client: AsyncClient,
+                                                              user_headers: dict):
+        """Section 10: enforced on the backend, not by hiding a button."""
+        assert (await client.get("/v1/users", headers=user_headers)).status_code == 403
+        assert (await client.post("/v1/users", headers=user_headers, json={
+            "username": "sneaky", "email": "sneaky@example.com",
+            "password": "SomethingStrong9!"})).status_code == 403
+        assert (await client.get("/v1/audit-logs", headers=user_headers)).status_code == 403
+        assert (await client.put("/v1/gateways/mockpay/credentials", headers=user_headers,
+                                 json={"environment": "sandbox", "values": {}})
+                ).status_code == 403
+
+    async def test_a_normal_user_can_do_their_own_job(self, client: AsyncClient,
+                                                      user_headers: dict):
+        """A USER runs payment tests and reads results — that is the point of the role."""
         assert (await client.get("/v1/comparison/dashboard",
-                                 headers=viewer_headers)).status_code == 200
+                                 headers=user_headers)).status_code == 200
+        assert (await client.get("/v1/transactions", headers=user_headers)).status_code == 200
+        started = await client.post("/v1/transactions/start", headers=user_headers, json={
+            "gateway_code": "mockpay", "integration_type": "direct",
+            "amount": 1.0, "currency": "SAR"})
+        assert started.status_code == 200, started.text
+
+    async def test_a_transaction_records_who_ran_it(self, client: AsyncClient,
+                                                    user_headers: dict):
+        started = await client.post("/v1/transactions/start", headers=user_headers, json={
+            "gateway_code": "mockpay", "integration_type": "direct",
+            "amount": 1.0, "currency": "SAR"})
+        transaction_id = started.json()["transaction_id"]
+        detail = await client.get(f"/v1/transactions/{transaction_id}",
+                                  headers=user_headers)
+        assert detail.json()["created_by_username"] == "test.user"
+
+    async def test_own_password_change_requires_the_current_one(self, client: AsyncClient,
+                                                                user_headers: dict):
+        wrong = await client.post("/v1/auth/change-password", headers=user_headers, json={
+            "current_password": "not-it", "new_password": "AnotherSecret9!"})
+        assert wrong.status_code == 400
+
+        ok = await client.post("/v1/auth/change-password", headers=user_headers, json={
+            "current_password": "RegularUserPass9!", "new_password": "AnotherSecret9!",
+            "confirm_password": "AnotherSecret9!"})
+        assert ok.status_code == 200
+
+
+class TestAuditLog:
+    async def test_user_management_actions_are_audited(self, client: AsyncClient,
+                                                       auth_headers: dict):
+        created = await client.post("/v1/users", headers=auth_headers, json={
+            "username": "audited", "email": "audited@example.com",
+            "password": "SomethingStrong9!"})
+        user_id = created.json()["id"]
+        await client.patch(f"/v1/users/{user_id}", headers=auth_headers,
+                           json={"role": "ADMIN"})
+        await client.post(f"/v1/users/{user_id}/disable", headers=auth_headers)
+        await client.post(f"/v1/users/{user_id}/enable", headers=auth_headers)
+        await client.post(f"/v1/users/{user_id}/reset-password", headers=auth_headers,
+                          json={"new_password": "BrandNewSecret9!"})
+
+        logs = await client.get("/v1/audit-logs", headers=auth_headers)
+        events = [row["event"] for row in logs.json()["items"]]
+        for expected in ("USER_CREATED", "USER_UPDATED", "USER_ROLE_CHANGED",
+                         "USER_DISABLED", "USER_ENABLED", "USER_PASSWORD_RESET",
+                         "LOGIN_SUCCESS"):
+            assert expected in events, f"{expected} missing from {events}"
+
+    async def test_failed_logins_are_audited_without_the_password(self,
+                                                                  client: AsyncClient,
+                                                                  auth_headers: dict):
+        await client.post("/v1/auth/login",
+                          json={"username": "admin", "password": "Sup3rSecretGuess!"})
+        logs = await client.get("/v1/audit-logs?event=LOGIN_FAILED", headers=auth_headers)
+        body = logs.json()
+        assert body["total"] >= 1
+        assert body["items"][0]["subject_label"] == "admin"
+        # The attempt is recorded; what was tried as a password is not.
+        assert "Sup3rSecretGuess" not in logs.text
+
+    async def test_an_unknown_handle_is_still_audited(self, client: AsyncClient,
+                                                      auth_headers: dict):
+        await client.post("/v1/auth/login",
+                          json={"username": "ghost", "password": "whatever"})
+        logs = await client.get("/v1/audit-logs?event=LOGIN_FAILED", headers=auth_headers)
+        assert any(row["subject_label"] == "ghost" for row in logs.json()["items"])
 
 
 class TestGateways:
@@ -224,6 +537,47 @@ class TestTransactionLifecycle:
         assert started["status"] == "PENDING"
         assert started["redirect_url"]
 
+    async def test_the_return_leg_escapes_the_gateways_frame(
+            self, client: AsyncClient, auth_headers: dict):
+        """A checkout mounted as a script returns the browser inside its own iframe.
+
+        A redirect there only moves the frame to a page ``X-Frame-Options: DENY``
+        refuses to render, so the cardholder sees an empty box while the payment has
+        actually succeeded. The return leg answers with a document that climbs out to
+        the top window instead — and must not carry the header that would stop the
+        browser rendering *it*.
+        """
+        await configure_mockpay(client, auth_headers)
+        started = await run_transaction(client, auth_headers, integration_type="hpp")
+        transaction_id = started["transaction_id"]
+
+        response = await client.get(f"/v1/transactions/{transaction_id}/return",
+                                    follow_redirects=False)
+        assert response.status_code == 200
+        assert "x-frame-options" not in response.headers
+        # The internal marker is stripped on the way out.
+        assert "x-burapay-framable" not in response.headers
+        assert "window.top" in response.text
+        assert f"/transactions/{transaction_id}" in response.text
+        # Still works with script off, and still offers something to click.
+        assert "http-equiv=\"refresh\"" in response.text
+        assert "target=\"_top\"" in response.text
+
+    async def test_every_other_route_still_denies_framing(
+            self, client: AsyncClient, auth_headers: dict):
+        """The opt-out is one route, not a hole in the default."""
+        for path in ("/v1/gateways", "/v1/transactions", "/health"):
+            response = await client.get(path, headers=auth_headers)
+            assert response.headers.get("x-frame-options") == "DENY", path
+
+    async def test_an_unknown_transaction_also_gets_a_breakout_page(
+            self, client: AsyncClient):
+        response = await client.get("/v1/transactions/nope/return",
+                                    follow_redirects=False)
+        assert response.status_code == 200
+        assert "unknown-transaction" in response.text
+        assert "x-frame-options" not in response.headers
+
     async def test_hpp_return_leg_completes_the_transaction(
             self, client: AsyncClient, auth_headers: dict):
         await configure_mockpay(client, auth_headers)
@@ -232,7 +586,8 @@ class TestTransactionLifecycle:
 
         response = await client.get(f"/v1/transactions/{transaction_id}/return",
                                     follow_redirects=False)
-        assert response.status_code == 303
+        assert response.status_code == 200
+        assert f"/transactions/{transaction_id}" in response.text
 
         transaction = (await client.get(f"/v1/transactions/{transaction_id}",
                                         headers=auth_headers)).json()["transaction"]
@@ -333,7 +688,7 @@ class TestTransactionLifecycle:
         response = await client.get(
             f"/v1/transactions/{started['transaction_id']}/return",
             follow_redirects=False)
-        assert response.status_code == 303
+        assert response.status_code == 200
 
         detail = (await client.get(f"/v1/transactions/{started['transaction_id']}",
                                    headers=auth_headers)).json()

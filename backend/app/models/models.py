@@ -21,17 +21,92 @@ from sqlalchemy import (Boolean, DateTime, Float, ForeignKey, Integer, JSON, Str
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, Timestamped, UUIDPrimaryKey, utcnow
+from app.models.enums import UserRole, UserStatus
 
 
 class User(UUIDPrimaryKey, Timestamped, Base):
+    """A BuraPay operator account (specification sections 9 and 10).
+
+    Accounts are disabled, never deleted: ``created_by_user_id`` on this table and
+    ``created_by_user_id`` on ``transactions`` both point here, and removing a row
+    would erase the answer to "who ran this test".
+    """
+
     __tablename__ = "users"
 
+    #: The sign-in handle. Either this or the email address is accepted at login, so
+    #: both are unique and both are stored folded to lower case — otherwise
+    #: ``John.Smith`` and ``john.smith`` would be two accounts that look like one.
+    username: Mapped[str] = mapped_column(String(64), unique=True, nullable=False,
+                                          index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     full_name: Mapped[Optional[str]] = mapped_column(String(255))
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(32), nullable=False, default="viewer")
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, default="USER")
+    #: ACTIVE | INACTIVE | LOCKED. Only ACTIVE may sign in.
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE",
+                                        index=True)
     last_login_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    last_login_ip: Mapped[Optional[str]] = mapped_column(String(64))
+    #: Consecutive failures since the last success. Reset on every successful sign-in;
+    #: drives the lockout in ``app.services.auth``.
+    failed_login_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: When brute-force protection locked the account, so the lockout can expire.
+    locked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    password_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    #: Who created this account. Null for the bootstrap administrator, which no user
+    #: created, and for accounts made by the CLI.
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
+
+    created_by: Mapped[Optional["User"]] = relationship(remote_side="User.id")
+
+    @property
+    def is_active(self) -> bool:
+        """Whether this account may sign in.
+
+        Kept as a property rather than a column: a boolean cannot distinguish an
+        account an administrator disabled from one the platform locked, and callers
+        that only need "may this request proceed" should not have to know which.
+        """
+        return self.status == UserStatus.ACTIVE.value
+
+    @property
+    def is_admin(self) -> bool:
+        return self.role == UserRole.ADMIN.value
+
+
+class AuditLog(UUIDPrimaryKey, Base):
+    """An authentication or user-management event (specification section 10).
+
+    Append-only by convention: nothing in the application updates or deletes a row
+    here. The payload is a small map of what changed — never a password, never a hash,
+    never a token, because an audit trail that leaks credentials is worse than none.
+    """
+
+    __tablename__ = "audit_logs"
+    __table_args__ = (Index("ix_audit_logs_event_created", "event", "created_at"),)
+
+    event: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    #: The account the event is *about*. Null for a failed login against a username
+    #: that does not exist — the attempt still matters, but there is no account to
+    #: attribute it to.
+    user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    #: The account that *performed* the action. Equal to ``user_id`` for a self-service
+    #: action such as a login; different for anything an administrator did.
+    performed_by_user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    #: Denormalised labels, so the log still reads correctly after a rename and
+    #: without a join. For a failed login this is the handle that was tried.
+    subject_label: Mapped[Optional[str]] = mapped_column(String(255))
+    performed_by_label: Mapped[Optional[str]] = mapped_column(String(255))
+    ip_address: Mapped[Optional[str]] = mapped_column(String(64))
+    user_agent: Mapped[Optional[str]] = mapped_column(String(500))
+    #: What changed, sanitized. Field names and old/new values for non-secret fields.
+    detail: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow, index=True)
 
 
 class Gateway(UUIDPrimaryKey, Timestamped, Base):
@@ -182,6 +257,19 @@ class Transaction(UUIDPrimaryKey, Base):
     gateway_response_code: Mapped[Optional[str]] = mapped_column(String(50))
     gateway_response_message: Mapped[Optional[str]] = mapped_column(Text)
     methodology: Mapped[str] = mapped_column(String(20), nullable=False, default="mixed")
+    #: Who started this transaction (specification section 10). Null for rows written
+    #: before ownership was recorded, and for a transaction created by a benchmark run
+    #: whose own ``created_by`` carries the answer.
+    created_by_user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    #: Who asked for the most recent follow-up operation — capture, refund, void, CIT,
+    #: MIT or inquiry. Distinct from ``created_by_user_id``, because the person who
+    #: refunds a payment is frequently not the person who made it.
+    requested_by_user_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    #: The operation ``requested_by_user_id`` refers to, so the pair reads as a
+    #: sentence: "REFUND requested by ...".
+    requested_operation: Mapped[Optional[str]] = mapped_column(String(40))
     webhook_received_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     #: Opaque per-adapter state needed to finish a two-legged HPP flow. Sanitized
     #: before it is written; never contains a credential.

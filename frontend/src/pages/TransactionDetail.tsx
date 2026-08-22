@@ -361,6 +361,16 @@ export default function TransactionDetail() {
             <dd className="break-all font-mono text-xs">
               {transaction.gateway_transaction_id ?? '—'}
             </dd>
+            <dt className="text-ink-500">Run by</dt>
+            <dd>{detail.created_by_username ?? '—'}</dd>
+            {detail.requested_by_username && (
+              <>
+                <dt className="text-ink-500">
+                  {transaction.requested_operation ?? 'Operation'} requested by
+                </dt>
+                <dd>{detail.requested_by_username}</dd>
+              </>
+            )}
             <dt className="text-ink-500">Started</dt>
             <dd>{dateTime(transaction.started_at)}</dd>
             <dt className="text-ink-500">Completed</dt>

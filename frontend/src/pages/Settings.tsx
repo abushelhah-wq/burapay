@@ -1,5 +1,8 @@
 /**
- * Settings: gateway credentials, benchmark limits, scoring weights, users.
+ * Settings: gateway credentials, benchmark limits and scoring weights.
+ *
+ * User management has its own screen (specification section 10); this page links to it
+ * rather than carrying a second, thinner copy of it.
  *
  * Credential fields are rendered from what the adapter declares, so a gateway added
  * later gets a working form with no frontend change. Secrets arrive masked and are
@@ -8,13 +11,12 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 
 import { api } from '../api/client'
-import type { AppSettings, Gateway, User } from '../api/types'
+import type { AppSettings, Gateway } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { Badge, Card, ErrorNotice, Note, Spinner } from '../components/ui'
-import { dateTime } from '../lib/format'
 
 function GatewayCredentials({ gateway, onSaved }: {
   gateway: Gateway
@@ -164,11 +166,10 @@ function GatewayCredentials({ gateway, onSaved }: {
 }
 
 export default function Settings() {
-  const { isAdmin, user } = useAuth()
+  const { isAdmin } = useAuth()
   const [params, setParams] = useSearchParams()
   const [gateways, setGateways] = useState<Gateway[] | null>(null)
   const [settings, setSettings] = useState<AppSettings | null>(null)
-  const [users, setUsers] = useState<User[]>([])
   const [error, setError] = useState<unknown>(null)
   const [saved, setSaved] = useState<string | null>(null)
 
@@ -184,9 +185,8 @@ export default function Settings() {
         }
       })
       .catch(setError)
-    if (isAdmin) api.users().then(setUsers).catch(() => setUsers([]))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isAdmin])
+  }, [])
 
   useEffect(() => { load() }, [load])
 
@@ -298,33 +298,13 @@ export default function Settings() {
 
       {isAdmin && (
         <Card title="Users">
-          <table className="table">
-            <thead>
-              <tr><th>Email</th><th>Role</th><th>Last sign-in</th><th /></tr>
-            </thead>
-            <tbody>
-              {users.map((row) => (
-                <tr key={row.id}>
-                  <td>{row.email}</td>
-                  <td><Badge tone={row.role === 'admin' ? 'info' : 'neutral'}>{row.role}</Badge></td>
-                  <td className="text-xs text-ink-500">{dateTime(row.last_login_at)}</td>
-                  <td className="text-right">
-                    {row.id !== user?.id && (
-                      <button className="btn-ghost text-xs text-red-600"
-                              onClick={async () => {
-                                if (!confirm(`Delete ${row.email}?`)) return
-                                await api.deleteUser(row.id)
-                                setUsers(await api.users())
-                              }}>
-                        Delete
-                      </button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <NewUserForm onCreated={async () => setUsers(await api.users())} />
+          <p className="text-sm text-ink-600">
+            Accounts, roles and password resets live on their own screen, which also
+            shows the audit trail for each change.
+          </p>
+          <Link to="/users" className="btn-secondary mt-3 inline-block">
+            Open Users
+          </Link>
         </Card>
       )}
     </div>
@@ -418,44 +398,3 @@ function ScoringWeights({ settings, disabled, onSave }: {
   )
 }
 
-function NewUserForm({ onCreated }: { onCreated: () => Promise<void> }) {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [role, setRole] = useState('viewer')
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  return (
-    <form className="mt-6 border-t border-ink-200 pt-6"
-          onSubmit={async (event) => {
-            event.preventDefault()
-            setBusy(true)
-            setError(null)
-            try {
-              await api.createUser({ email, password, role })
-              setEmail('')
-              setPassword('')
-              await onCreated()
-            } catch (exc) {
-              setError(exc instanceof Error ? exc.message : 'Could not create the user.')
-            } finally { setBusy(false) }
-          }}>
-      <p className="mb-3 text-sm font-medium text-ink-700">Add a user</p>
-      <div className="grid gap-3 sm:grid-cols-4">
-        <input className="input sm:col-span-2" type="email" placeholder="email@example.com"
-               value={email} required onChange={(e) => setEmail(e.target.value)} />
-        <input className="input" type="password" placeholder="Password (12+ characters)"
-               value={password} required minLength={12}
-               onChange={(e) => setPassword(e.target.value)} />
-        <select className="input" value={role} onChange={(e) => setRole(e.target.value)}>
-          <option value="viewer">Viewer</option>
-          <option value="admin">Admin</option>
-        </select>
-      </div>
-      {error && <p className="mt-2 text-sm text-red-600">{error}</p>}
-      <button type="submit" className="btn-secondary mt-3" disabled={busy}>
-        {busy ? 'Creating…' : 'Create user'}
-      </button>
-    </form>
-  )
-}

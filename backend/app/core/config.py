@@ -28,6 +28,10 @@ Environment = Literal["sandbox", "production"]
 DEV_SECRET_KEY = "dev-only-insecure-secret-key-change-me"
 #: A valid Fernet key (32 url-safe base64 bytes) used only when ENCRYPTION_KEY is unset.
 DEV_ENCRYPTION_KEY = "ZGV2LW9ubHktaW5zZWN1cmUtZmVybmV0LWtleS0zMmJ5dGU="
+#: The bootstrap administrator password used when none is configured. Refused in
+#: production for the same reason as the other two: a published default password on
+#: an account with every permission is the same as no password at all.
+DEV_BOOTSTRAP_PASSWORD = "ChangeMe!123"
 
 
 class Settings(BaseSettings):
@@ -46,9 +50,29 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
 
     #: Created on first boot when no user exists at all. Changing these after the
-    #: first boot does nothing — the account already exists.
+    #: first boot does nothing — the account already exists. Section 10 forbids
+    #: hard-coding an administrator in source; these are environment values with a
+    #: development default that is refused in production alongside the other secrets.
+    bootstrap_admin_username: str = "admin"
     bootstrap_admin_email: str = "admin@busrapay.com"
-    bootstrap_admin_password: str = "ChangeMe!123"
+    bootstrap_admin_password: str = DEV_BOOTSTRAP_PASSWORD
+
+    # -- login protection (specification section 9) ------------------------ #
+    #: Consecutive failures before the account is locked. The counter resets on the
+    #: first success.
+    login_max_failed_attempts: int = 5
+    #: How long a lockout lasts before the account unlocks itself. An administrator can
+    #: always clear it sooner by re-enabling the account.
+    login_lockout_minutes: int = 15
+    #: Sliding-window rate limit applied per client address, before any account is
+    #: looked up. Stops a spray across many usernames, which per-account lockout alone
+    #: does not.
+    login_rate_limit_attempts: int = 20
+    login_rate_limit_window_seconds: int = 300
+    #: Trust ``X-Forwarded-For`` for the client address. True behind the deployment's
+    #: Traefik, which sets it; must be false if the app is ever exposed directly,
+    #: because a client can otherwise forge its own rate-limit bucket.
+    trust_forwarded_for: bool = True
 
     # -- database --------------------------------------------------------- #
     database_url: str = Field(
@@ -105,6 +129,8 @@ class Settings(BaseSettings):
             problems.append("APP_SECRET_KEY")
         if self.encryption_key == DEV_ENCRYPTION_KEY:
             problems.append("ENCRYPTION_KEY")
+        if self.bootstrap_admin_password == DEV_BOOTSTRAP_PASSWORD:
+            problems.append("BOOTSTRAP_ADMIN_PASSWORD")
         return problems
 
 

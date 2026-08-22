@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import httpx
 
@@ -129,6 +129,34 @@ class HyperPayAdapter(PaymentGatewayAdapter):
     def _code(body: Mapping[str, Any]) -> str:
         return str((body.get("result") or {}).get("code") or "")
 
+    async def _result_body(self, client: InstrumentedClient, response: httpx.Response,
+                           what: str,
+                           accept: Sequence[int] = (200, 201)) -> Dict[str, Any]:
+        """Read a payment response, whatever HTTP status OPPWA chose for it.
+
+        OPPWA answers some rejections with a 4xx *and* a complete result body —
+        ``100.390.106`` ("error in 3DSecure configuration") is one. Sending those
+        through :meth:`expect_ok` treats an evaluated, explained rejection as a
+        transport failure: the caller gets raw JSON dumped into an exception message,
+        ``_outcome`` never runs, so ``result.code`` never reaches the call log and
+        :meth:`_hint` never gets to say what to actually do about it. The transaction
+        is then recorded as a platform error rather than the decline it is, which is
+        the difference between a gateway being measured fairly and not.
+
+        So: a body carrying a ``result.code`` is an outcome, and is returned for
+        ``_outcome`` to classify. Anything else — an HTML error page, a proxy timeout,
+        a body with no result in it — is still a transport failure and still raises.
+        """
+        if response.status_code in tuple(accept):
+            return await self.json_body(client, response, what)
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
+        if isinstance(body, dict) and self._code(body):
+            return body
+        return await self.expect_ok(client, response, what, accept=accept)
+
     def _status_for(self, code: str) -> TransactionStatus:
         if code.startswith("000.000.") or code.startswith("000.100.1"):
             return TransactionStatus.SUCCESS
@@ -203,7 +231,7 @@ class HyperPayAdapter(PaymentGatewayAdapter):
             data=self._base_data(request, paymentType="DB",
                                  merchantTransactionId=request.reference,
                                  shopperResultUrl=request.return_url))
-        body = await self.expect_ok(client, response, "prepare checkout", accept=(200, 201))
+        body = await self._result_body(client, response, "prepare checkout")
         self._require_ok(self._outcome(client, body), "prepare checkout")
         checkout_id = self._id(body)
         # Copy&Pay is a widget mounted in the merchant's own page rather than a hosted
@@ -224,7 +252,7 @@ class HyperPayAdapter(PaymentGatewayAdapter):
             "GET {resourcePath}", "GET", self._url(resource_path),
             normalized=NormalizedOperation.STATUS_CHECK,
             params={"entityId": self.get("entity_id") or ""})
-        body = await self.expect_ok(client, response, "checkout status", accept=(200,))
+        body = await self._result_body(client, response, "checkout status", accept=(200,))
         return self._outcome(client, body)
 
     # -- Direct ----------------------------------------------------------- #
@@ -245,7 +273,7 @@ class HyperPayAdapter(PaymentGatewayAdapter):
         response = await client.call(
             "POST /v1/payments (DB)", "POST", self._url("/v1/payments"),
             normalized=NormalizedOperation.AUTHORIZATION, data=data)
-        body = await self.expect_ok(client, response, "create payment", accept=(200, 201))
+        body = await self._result_body(client, response, "create payment")
         result = self._outcome(client, body)
 
         three_ds = bool(body.get("redirect")) or self._code(body).startswith("000.200.")
@@ -255,8 +283,8 @@ class HyperPayAdapter(PaymentGatewayAdapter):
                 "GET {resourcePath}", "GET", self._url(resource_path),
                 normalized=NormalizedOperation.STATUS_CHECK,
                 params={"entityId": self.get("entity_id") or ""})
-            body = await self.expect_ok(client, status_response, "payment status",
-                                        accept=(200,))
+            body = await self._result_body(client, status_response, "payment status",
+                                           accept=(200,))
             result = self._outcome(client, body)
         result.three_ds_required = three_ds
         return result
@@ -267,7 +295,7 @@ class HyperPayAdapter(PaymentGatewayAdapter):
             "GET /v1/payments/{id}", "GET", self._url(f"/v1/payments/{payment_id}"),
             normalized=NormalizedOperation.STATUS_CHECK,
             params={"entityId": self.get("entity_id") or ""})
-        body = await self.expect_ok(client, response, "payment status", accept=(200,))
+        body = await self._result_body(client, response, "payment status", accept=(200,))
         return self._outcome(client, body)
 
     async def refund_payment(self, client: InstrumentedClient, payment_id: str,
@@ -281,7 +309,7 @@ class HyperPayAdapter(PaymentGatewayAdapter):
             data.update({"amount": self.decimal_amount(amount), "currency": currency})
         response = await client.call("POST refund (paymentType=RF)", "POST", url,
                                      normalized=NormalizedOperation.REFUND, data=data)
-        body = await self.expect_ok(client, response, "refund", accept=(200, 201))
+        body = await self._result_body(client, response, "refund")
         return self._outcome(client, body)
 
     # -- webhook ---------------------------------------------------------- #

@@ -19,7 +19,8 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.security import hash_password
 from app.gateways.registry import all_descriptors
-from app.models import AppSetting, Gateway, User, UserRole
+from app.db.base import utcnow
+from app.models import AppSetting, Gateway, User, UserRole, UserStatus
 
 logger = get_logger(__name__)
 
@@ -79,21 +80,35 @@ async def seed_settings(session: AsyncSession) -> None:
 
 
 async def seed_admin(session: AsyncSession) -> None:
-    """Create the bootstrap admin, but only when the platform has no users at all.
+    """Create the first administrator, but only when the platform has no users at all.
 
-    Changing the bootstrap variables later does nothing: the account already exists,
-    and silently resetting its password on every restart would be a back door.
+    Specification section 10: the initial administrator comes from the environment or
+    the CLI, never from a hard-coded account in source. Three properties make this
+    safe to run on every start-up:
+
+    * It only ever *creates*. Changing ``BOOTSTRAP_ADMIN_PASSWORD`` after the first
+      boot does nothing — silently resetting the administrator's password on every
+      restart would be a back door with an environment variable for a key.
+    * The password is hashed before it is stored, like every other password.
+    * Nothing here logs the password. The warning names the account and says to change
+      it; it does not say what it is.
     """
     count = (await session.execute(select(func.count()).select_from(User))).scalar_one()
     if count:
         return
-    session.add(User(email=settings.bootstrap_admin_email.lower(),
+    session.add(User(username=settings.bootstrap_admin_username.strip().lower(),
+                     email=settings.bootstrap_admin_email.strip().lower(),
                      full_name="BuraPay Administrator",
                      hashed_password=hash_password(settings.bootstrap_admin_password),
-                     role=UserRole.ADMIN.value, is_active=True))
+                     role=UserRole.ADMIN.value, status=UserStatus.ACTIVE.value,
+                     password_changed_at=utcnow()))
     await session.commit()
-    logger.warning("bootstrap admin created — change this password immediately",
-                   extra={"email": settings.bootstrap_admin_email})
+    logger.warning(
+        "initial administrator created from the environment — sign in and change this "
+        "password now",
+        extra={"operation": "bootstrap", "status": "created",
+               "username": settings.bootstrap_admin_username,
+               "email": settings.bootstrap_admin_email})
 
 
 async def bootstrap(session: AsyncSession) -> None:

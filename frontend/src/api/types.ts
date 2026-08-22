@@ -14,13 +14,51 @@ export interface StatSummary {
   reliable: boolean
 }
 
+export type UserRole = 'ADMIN' | 'USER'
+export type UserStatus = 'ACTIVE' | 'INACTIVE' | 'LOCKED'
+
 export interface User {
   id: string
+  username: string
   email: string
   full_name: string | null
-  role: 'admin' | 'viewer'
-  is_active: boolean
+  role: UserRole
+  status: UserStatus
+  created_at: string | null
   last_login_at: string | null
+  created_by_user_id: string | null
+  created_by_username: string | null
+}
+
+export interface RoleDescription {
+  value: UserRole
+  label: string
+  permissions: string[]
+}
+
+/** One row of the audit trail. Never carries a password or any other secret. */
+export interface AuditLogEntry {
+  id: string
+  event: string
+  user_id: string | null
+  performed_by_user_id: string | null
+  subject_label: string | null
+  performed_by_label: string | null
+  ip_address: string | null
+  user_agent: string | null
+  detail: Record<string, unknown>
+  created_at: string
+}
+
+export interface UserFilters {
+  search?: string
+  name?: string
+  username?: string
+  email?: string
+  role?: string
+  status?: string
+  limit?: number
+  offset?: number
 }
 
 export interface CredentialField {
@@ -87,6 +125,10 @@ export interface Transaction {
   gateway_response_message: string | null
   methodology: string
   webhook_received_at: string | null
+  /** Who ran this test, and who asked for the follow-up operation on it. */
+  created_by_user_id: string | null
+  requested_by_user_id: string | null
+  requested_operation: string | null
 }
 
 export interface ApiMeasurement {
@@ -138,6 +180,9 @@ export interface TransactionDetail {
   gateway_api_time_ms: number
   setup_call_time_ms: number
   documented_calls: string | null
+  /** Usernames for the ownership ids, resolved so the page needs no admin-only call. */
+  created_by_username: string | null
+  requested_by_username: string | null
   /** Present only on the transaction that minted it, for copying into Settings. */
   stored_token: string | null
   stored_token_hint: string | null

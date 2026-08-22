@@ -268,6 +268,12 @@ class TransactionOut(ORMModel):
     gateway_response_message: Optional[str] = None
     methodology: str = "mixed"
     webhook_received_at: Optional[datetime] = None
+    #: Who ran this test, and who asked for the follow-up operation on it
+    #: (specification section 10). Ids rather than names in the row itself; the detail
+    #: view resolves them for display.
+    created_by_user_id: Optional[str] = None
+    requested_by_user_id: Optional[str] = None
+    requested_operation: Optional[str] = None
 
 
 class TransactionDetail(BaseModel):
@@ -278,6 +284,10 @@ class TransactionDetail(BaseModel):
     gateway_api_time_ms: float = 0.0
     setup_call_time_ms: float = 0.0
     documented_calls: Optional[str] = None
+    #: Usernames for the two ownership ids above, resolved once so the detail page
+    #: does not have to call the administrator-only users API to render a name.
+    created_by_username: Optional[str] = None
+    requested_by_username: Optional[str] = None
     #: A card token this payment minted. Shown once, on the transaction that created
     #: it, for copying into the gateway's settings — never stored there automatically,
     #: because a card token belongs to a cardholder rather than to the merchant.

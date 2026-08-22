@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.health import router as health_router
+from app.api.v1.three_ds import FRAMABLE_HEADER
 from app.api.v1.router import api_router
 from app.api.webhooks import router as webhooks_router
 from app.core.config import settings
@@ -121,7 +122,14 @@ async def request_context(request: Request, call_next):
     response.headers["X-Request-ID"] = request_id
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    response.headers.setdefault("X-Frame-Options", "DENY")
+    # Framing is denied everywhere except the handful of routes that opt out with the
+    # marker header — today only the gateway return leg, which a hosted checkout
+    # mounted as a script navigates *inside its own iframe*. The marker is internal and
+    # never reaches a client.
+    if FRAMABLE_HEADER in response.headers:
+        del response.headers[FRAMABLE_HEADER]
+    else:
+        response.headers.setdefault("X-Frame-Options", "DENY")
     if settings.public_base_url.startswith("https://"):
         response.headers.setdefault("Strict-Transport-Security",
                                     "max-age=31536000; includeSubDomains")
@@ -182,12 +190,35 @@ async def handle_http_exception(request: Request,
                         status_code=exc.status_code, headers=getattr(exc, "headers", None))
 
 
+def _readable_errors(exc: RequestValidationError) -> list:
+    """Validation failures as plain JSON.
+
+    Pydantic puts the original exception object in each error's ``ctx``, and a custom
+    validator — the password policy, for one — therefore leaves a ``ValueError`` in
+    there that ``json.dumps`` cannot encode. Only the field and the message are useful
+    to a client anyway, so that is all this returns.
+    """
+    errors = []
+    for error in exc.errors():
+        location = [str(part) for part in error.get("loc", ())
+                    if part not in ("body", "query", "path")]
+        errors.append({"field": ".".join(location) or None,
+                       "message": str(error.get("msg", "")),
+                       "type": str(error.get("type", ""))})
+    return errors
+
+
 @app.exception_handler(RequestValidationError)
 async def handle_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = _readable_errors(exc)
+    # Surface the first message in ``message`` too: a form that shows only "The request
+    # could not be validated" makes the caller dig for what is actually wrong, and the
+    # password rules are precisely what somebody needs to read.
+    first = errors[0]["message"] if errors else ""
     return JSONResponse(
         {"category": ErrorCategory.INVALID_REQUEST.value,
-         "message": "The request could not be validated.",
-         "detail": {"errors": exc.errors()}},
+         "message": first or "The request could not be validated.",
+         "detail": {"errors": errors}},
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
 

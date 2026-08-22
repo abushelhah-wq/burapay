@@ -9,13 +9,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_admin
-from app.api.v1.three_ds import (FORM_PATTERN, challenge_document,
-                                 no_form_document)
+from app.api.deps import get_current_user, require_admin, require_user
+from app.api.v1.three_ds import (FORM_PATTERN, FRAMABLE_HEADER,
+                                 challenge_document, no_form_document,
+                                 return_document)
 from app.core.config import settings as app_settings
 from app.core.errors import BenchmarkError, NotConfigured, NotSupported
 from app.core.logging import get_logger
@@ -66,9 +67,28 @@ def _accepted_card(payload: StartTransactionRequest) -> Optional[Card]:
                 holder=payload.card.holder)
 
 
+def _record_operator(transaction, payload: StartTransactionRequest, user: User) -> None:
+    """Attribute a customer- or merchant-initiated charge to whoever asked for it.
+
+    Section 10 wants ``requested_by_user_id`` on the operations the study runs against
+    an existing credential — CIT and MIT among them — separately from who created the
+    transaction, because the two are frequently different people. For a plain one-off
+    payment there is no separate request to attribute, so the field stays null and
+    ``created_by_user_id`` is the whole answer.
+    """
+    operation = None
+    if payload.payment_mode == "token":
+        operation = (payload.initiated_by or "MIT").upper()
+    elif payload.initiated_by:
+        operation = payload.initiated_by.upper()
+    if operation:
+        transaction.requested_by_user_id = user.id
+        transaction.requested_operation = operation[:40]
+
+
 @router.post("/start", response_model=StartTransactionResponse)
 async def start_transaction(payload: StartTransactionRequest,
-                            _: User = Depends(require_admin),
+                            user: User = Depends(require_user),
                             session: AsyncSession = Depends(get_session)
                             ) -> StartTransactionResponse:
     """Start one benchmarked transaction.
@@ -76,6 +96,10 @@ async def start_transaction(payload: StartTransactionRequest,
     Direct API completes here and returns the final status. HPP returns a redirect
     target: the customer's time on the gateway's page is theirs, and the transaction
     stays PENDING until they come back.
+
+    Open to any signed-in account: running payment tests is what a normal BuraPay user
+    is for (specification section 10). Who ran it is recorded on the transaction, so
+    the study can attribute every result.
     """
     card = _accepted_card(payload)
     try:
@@ -87,7 +111,10 @@ async def start_transaction(payload: StartTransactionRequest,
                 methodology=payload.methodology, payment_mode=payload.payment_mode,
                 card=card, token_id=payload.token_id,
                 agreement_id=payload.agreement_id, initiated_by=payload.initiated_by,
-                browser=payload.browser.model_dump() if payload.browser else None)
+                browser=payload.browser.model_dump() if payload.browser else None,
+                created_by_user_id=user.id)
+            _record_operator(transaction, payload, user)
+            await session.commit()
             context = transaction.context or {}
             return StartTransactionResponse(
                 transaction_id=transaction.id, status=transaction.status,
@@ -103,7 +130,9 @@ async def start_transaction(payload: StartTransactionRequest,
             session, gateway_code=payload.gateway_code, amount=payload.amount,
             currency=payload.currency, description=payload.description,
             reference=payload.reference, environment=payload.environment,
-            methodology=payload.methodology)
+            methodology=payload.methodology, created_by_user_id=user.id)
+        _record_operator(transaction, payload, user)
+        await session.commit()
         return StartTransactionResponse(
             transaction_id=transaction.id, status=transaction.status,
             redirect_url=hpp.redirect_url, mode=hpp.mode,
@@ -118,9 +147,31 @@ async def start_transaction(payload: StartTransactionRequest,
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
 
+def _return_response(target: str) -> HTMLResponse:
+    """Answer the gateway's return navigation with a page that escapes the frame.
+
+    Not a redirect. A hosted checkout mounted as a script — Geidea's, which is MPGS
+    underneath — returns the browser *inside its own iframe*, and a 303 only moves the
+    frame to a target that ``X-Frame-Options: DENY`` then refuses to render, leaving
+    the cardholder with an empty box. See :func:`return_document`.
+
+    ``X-Frame-Options`` is deliberately absent here, and the marker header tells the
+    security middleware not to add its default. That costs nothing: this route is
+    already unauthenticated by design — the gateway navigates to it carrying no
+    session — it holds no data worth framing for, and it does nothing an attacker
+    could not do by requesting the URL directly. Clickjacking needs a victim's click
+    on something that matters, and there is nothing here to click.
+    """
+    return HTMLResponse(return_document(target), headers={
+        FRAMABLE_HEADER: "1",
+        "Cache-Control": "no-store",
+        "Referrer-Policy": "no-referrer",
+    })
+
+
 @router.get("/{transaction_id}/return")
 async def hpp_return(transaction_id: str, request: Request,
-                     session: AsyncSession = Depends(get_session)) -> RedirectResponse:
+                     session: AsyncSession = Depends(get_session)) -> HTMLResponse:
     """Where the gateway sends the customer's browser back to.
 
     Serves both pauses: a hosted checkout the customer has finished, and a Direct
@@ -134,7 +185,7 @@ async def hpp_return(transaction_id: str, request: Request,
     """
     transaction = await session.get(Transaction, transaction_id)
     if transaction is None:
-        return RedirectResponse("/transactions?error=unknown-transaction", status_code=303)
+        return _return_response("/transactions?error=unknown-transaction")
 
     # The RETURN_URL_RECEIVED event is recorded by the completion service, which knows
     # the offset from the transaction's own start; recording it here as well would put
@@ -148,7 +199,7 @@ async def hpp_return(transaction_id: str, request: Request,
                               "transaction_id": transaction.id,
                               "operation": "return_leg", "status": "error",
                               "error": str(exc)[:300]})
-    return RedirectResponse(f"/transactions/{transaction.id}", status_code=303)
+    return _return_response(f"/transactions/{transaction.id}")
 
 
 @router.get("/{transaction_id}/hpp", response_model=HppHandoff)

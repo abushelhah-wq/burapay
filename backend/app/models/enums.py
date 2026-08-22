@@ -142,5 +142,93 @@ class TestMethodology(str, Enum):
 
 
 class UserRole(str, Enum):
-    ADMIN = "admin"
-    VIEWER = "viewer"
+    """Who may do what (specification section 10).
+
+    ``USER`` replaces the older ``viewer``: a viewer could only read, while a normal
+    BuraPay user runs payment tests and performs the transaction operations the study
+    needs. The stored values are upper case to match the specification's vocabulary;
+    :func:`normalize_role` maps the historical lower-case values so a token or a row
+    written by an earlier version still reads back correctly.
+    """
+
+    ADMIN = "ADMIN"
+    USER = "USER"
+
+
+#: Values written by versions before roles were renamed, and the case-insensitive
+#: spellings a hand-written API call is likely to use.
+_ROLE_ALIASES = {
+    "admin": UserRole.ADMIN,
+    "administrator": UserRole.ADMIN,
+    "viewer": UserRole.USER,
+    "user": UserRole.USER,
+}
+
+
+def normalize_role(value: str) -> UserRole:
+    """Map any accepted spelling of a role onto the canonical enum.
+
+    Raises ``ValueError`` for anything unrecognised, which the API turns into a 422
+    rather than silently granting the safer-looking role — a typo that quietly became
+    ``USER`` would be a bug an administrator could not see.
+    """
+    try:
+        return _ROLE_ALIASES[str(value).strip().lower()]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported role {value!r}; expected one of "
+            f"{', '.join(role.value for role in UserRole)}") from exc
+
+
+class UserStatus(str, Enum):
+    """Account state (specification section 10).
+
+    A boolean cannot express the difference between an account an administrator
+    switched off and one the platform locked after repeated failed logins, and the
+    two need different remedies — so this is a status, not an ``is_active`` flag.
+    """
+
+    ACTIVE = "ACTIVE"
+    #: Disabled by an administrator. The preferred alternative to deletion, because it
+    #: keeps audit history and transaction ownership intact.
+    INACTIVE = "INACTIVE"
+    #: Locked by brute-force protection. Clears itself once the lockout window passes,
+    #: or immediately when an administrator re-enables the account.
+    LOCKED = "LOCKED"
+
+    @property
+    def can_sign_in(self) -> bool:
+        return self is UserStatus.ACTIVE
+
+
+_STATUS_ALIASES = {status.value.lower(): status for status in UserStatus}
+
+
+def normalize_status(value: str) -> UserStatus:
+    try:
+        return _STATUS_ALIASES[str(value).strip().lower()]
+    except KeyError as exc:
+        raise ValueError(
+            f"unsupported status {value!r}; expected one of "
+            f"{', '.join(status.value for status in UserStatus)}") from exc
+
+
+class AuditEvent(str, Enum):
+    """Auditable events (specification section 10).
+
+    An audit row records who did what to whom, never what the secret was: a password,
+    a hash and a token are all absent from every payload written here.
+    """
+
+    USER_CREATED = "USER_CREATED"
+    USER_UPDATED = "USER_UPDATED"
+    USER_DISABLED = "USER_DISABLED"
+    USER_ENABLED = "USER_ENABLED"
+    USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
+    USER_PASSWORD_RESET = "USER_PASSWORD_RESET"
+    USER_PASSWORD_CHANGED = "USER_PASSWORD_CHANGED"
+    USER_LOCKED = "USER_LOCKED"
+
+    LOGIN_SUCCESS = "LOGIN_SUCCESS"
+    LOGIN_FAILED = "LOGIN_FAILED"
+    LOGOUT = "LOGOUT"

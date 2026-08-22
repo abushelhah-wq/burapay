@@ -566,32 +566,57 @@ These are mandatory features, not optional enhancements.
 
 ---
 
-## Appendix A — Implementation status on `master`
+## Appendix A — Implementation status
 
-Recorded 2026-08-22 by inspecting `origin/master`. **This appendix is status, not
-requirement.** Update it when the code changes; never edit §0–§13 to match it.
+Recorded 2026-08-22. **This appendix is status, not requirement.** Update it when the
+code changes; never edit §0–§13 to match it.
 
-### §9 Authentication
+§9 and §10 are built. §11 and the §12 navigation changes that depend on it are not.
 
-| Requirement | On `master` | Delta |
-|---|---|---|
-| User model, hashed password | `users`: email, full_name, hashed_password, role, is_active, last_login_at | exists |
-| Login by **username** or email | `email` only — no `username` column | **add** `username`, unique, + login lookup on either |
-| Session management, logout | present | verify cookie flags, expiry |
-| Rate limiting / brute force | not found | **add** |
-| Audit logging of logins | no audit table (0 hits) | **add** |
+### §9 Authentication — built
 
-### §10 User management
+| Requirement | Where |
+|---|---|
+| Login by username **or** email | `app/services/auth.py:find_by_handle`, `POST /v1/auth/login` |
+| bcrypt hashing, never stored or logged in the clear | `app/core/security.py` |
+| Password complexity | `validate_password`, enforced on create, reset and self-change |
+| Generic failure, constant work | one `GENERIC_FAILURE` for all four causes; `burn_password_time` on an unknown handle |
+| Session management, logout, expiry | signed HS256 tokens, `ACCESS_TOKEN_EXPIRE_MINUTES`; `POST /v1/auth/logout` clears both cookies |
+| Secure cookies | `HttpOnly` + `Secure` (when `PUBLIC_BASE_URL` is HTTPS) + `SameSite=Lax` |
+| CSRF | double-submit token, required on cookie-authenticated writes; bearer requests are exempt by construction |
+| Login rate limiting | per-address sliding window, `app/services/auth.py:SlidingWindowLimiter` |
+| Brute-force protection | per-account lockout to `LOCKED`, self-expiring after `LOGIN_LOCKOUT_MINUTES` |
+| Protected frontend routes and backend APIs | `RequireAuth`/`RequireAdmin` in the UI; `require_user`/`require_admin` in `app/api/deps.py` |
+| Audit of successful and failed logins | `LOGIN_SUCCESS`, `LOGIN_FAILED`, `LOGOUT`, including handles that match no account |
 
-| Requirement | On `master` | Delta |
-|---|---|---|
-| Roles `ADMIN` / `USER` | `UserRole.ADMIN="admin"`, `VIEWER="viewer"` | **rename/extend** — `viewer` is not `USER`; needs a migration and a data backfill |
-| Status ACTIVE/INACTIVE/LOCKED | `is_active` boolean | **replace** — a boolean cannot express `LOCKED` |
-| Users screen, create/edit/disable/reset | not found | **add** |
-| `created_by_user_id` on transactions | 0 hits | **add** |
-| `requested_by_user_id` on operations | 0 hits | **add** |
-| Audit events table | 0 hits | **add** |
-| Bootstrap admin | `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | keep names; add `BOOTSTRAP_ADMIN_USERNAME` |
+`SameSite=Lax` rather than `Strict` is deliberate: a gateway returning the browser from
+a hosted payment page is a top-level cross-site GET, and `Strict` would drop the session
+exactly there. Lax withholds the cookie from cross-site writes, and the CSRF token
+covers what remains.
+
+### §10 User management — built
+
+| Requirement | Where |
+|---|---|
+| Roles `ADMIN` / `USER` | `UserRole`; `normalize_role` still reads the historical `admin`/`viewer` values |
+| Status `ACTIVE` / `INACTIVE` / `LOCKED` | `UserStatus`; only `ACTIVE` may sign in |
+| Users screen, filters, create/edit/disable/enable/reset | `/v1/users`, `frontend/src/pages/Users.tsx`, `CreateUser.tsx`, `UserDetail.tsx` |
+| Disable rather than delete | there is no delete route; `POST /v1/users/{id}/disable` |
+| Backend role checks | `require_admin` on every `/v1/users` and `/v1/audit-logs` route |
+| `created_by_user_id` on transactions | set in `start_transaction`; shown as "Run by" on Transaction Detail |
+| `requested_by_user_id` on operations | set for CIT/MIT with `requested_operation`; extend as capture, refund, void and inquiry endpoints land with §11 |
+| Audit events table | `audit_logs`; read-only at `/v1/audit-logs` and **Users → Audit Log** |
+| Bootstrap admin | `BOOTSTRAP_ADMIN_USERNAME` / `_EMAIL` / `_PASSWORD`, or `python -m app.cli create-admin` |
+
+Migration `7b41c9de20a4` carries existing data across: usernames are backfilled from
+the local part of each email (collisions get a numeric suffix), `is_active` becomes
+`status`, and `admin`/`viewer` become `ADMIN`/`USER`. `viewer → USER` is a deliberate
+widening — a viewer could not run payment tests and a `USER` can — and it is the
+mapping §10 asks for.
+
+An administrator cannot demote or disable their own account; another administrator can.
+That is the smallest rule that prevents a deployment being locked out of itself without
+needing a racy "how many admins are left" count.
 
 ### §11 Webhooks
 
@@ -613,3 +638,9 @@ requirement.** Update it when the code changes; never edit §0–§13 to match i
 Credential profiles are load-bearing: the webhook URL scheme, Settings display
 and `WebhookEvent.credential_profile_id` all depend on that model existing. Build
 it before the webhook work, or the webhook work gets built twice.
+
+The §12 navigation is likewise deferred with §11. The `Users` section and its
+sub-navigation are in place, and `Layout.tsx` now renders nested groups, so the
+remaining regrouping (`Logs → API Calls / Webhooks`, `Settings → Payment Gateways /
+System`, `Tokens`, `Test Payment`) is a rename of existing routes that belongs in the
+same change as the screens it points at.

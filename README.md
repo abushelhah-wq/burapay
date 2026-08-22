@@ -163,10 +163,23 @@ no existing router, network or resolver. Details in
 
 ### Signing in and configuring a gateway
 
-Sign in at `https://busrapay.com` with the `BOOTSTRAP_ADMIN_EMAIL` and
-`BOOTSTRAP_ADMIN_PASSWORD` from `.env`. That account is created on first boot, only
-when the platform has no users at all — changing those variables later does nothing,
-because by then the account exists. Change the password from **Settings** immediately.
+Sign in at `https://busrapay.com` with the `BOOTSTRAP_ADMIN_USERNAME` (or
+`BOOTSTRAP_ADMIN_EMAIL` — either is accepted) and `BOOTSTRAP_ADMIN_PASSWORD` from
+`.env`. That account is created on first boot, only when the platform has no users at
+all — changing those variables later does nothing, because by then the account exists.
+Change the password from **Your account** immediately.
+
+Prefer not to put an initial password in a file at all? Leave
+`BOOTSTRAP_ADMIN_PASSWORD` unset for a moment and create the administrator from the
+CLI instead, which reads the password from a hidden prompt and writes it nowhere:
+
+```bash
+docker compose exec backend python -m app.cli create-admin
+```
+
+The same command has `reset-password` and `list-users` subcommands — the way back in
+when the only administrator account is locked out. Neither accepts a password as an
+argument, because arguments show up in `ps` and in shell history.
 
 Gateway credentials are then entered **in the browser**, not in a file:
 
@@ -241,7 +254,11 @@ Full list with commentary in [`.env.example`](.env.example). The ones that matte
 | `DATABASE_URL` | PostgreSQL DSN with the asyncpg driver. |
 | `PUBLIC_BASE_URL` | The public HTTPS origin. Gateways redirect browsers back to it and POST webhooks to it. |
 | `CORS_ORIGINS` | Comma-separated browser origins allowed to call the API. |
-| `BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD` | The first administrator, created only when the platform has no users at all. |
+| `BOOTSTRAP_ADMIN_USERNAME` / `_EMAIL` / `_PASSWORD` | The first administrator, created only when the platform has no users at all. `python -m app.cli create-admin` is the alternative that keeps the password out of any file. |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | Session lifetime. |
+| `LOGIN_MAX_FAILED_ATTEMPTS` / `LOGIN_LOCKOUT_MINUTES` | Consecutive failures before an account locks, and for how long. |
+| `LOGIN_RATE_LIMIT_ATTEMPTS` / `LOGIN_RATE_LIMIT_WINDOW_SECONDS` | Per-client-address sliding window on the login endpoint. |
+| `TRUST_FORWARDED_FOR` | Take the client address from `X-Forwarded-For`. True behind this deployment's Traefik; **false** if the backend is ever exposed directly. |
 | `DOMAIN` | The host Traefik routes to this stack. |
 | `TRAEFIK_NETWORK` | Only when Traefik runs in its own Docker network — see [Traefik integration](#traefik-integration). |
 | `TRAEFIK_ENTRYPOINT` | The existing HTTPS entrypoint name. |
@@ -427,6 +444,66 @@ which is not a thing to benchmark by accident.
 `resultDetails` is now reported alongside `result.code` on every HyperPay outcome. On a
 rejection it is frequently the only part that says which end the problem is at.
 
+OPPWA delivers this particular rejection as **HTTP 400 with a complete result body**, and
+that used to be read as a transport failure — the raw JSON was dumped into an exception,
+`result.code` never reached the call log, and a decline was recorded as a platform error.
+A body carrying a `result.code` is now treated as an outcome whatever the status, so what
+you see is the explanation above rather than:
+
+```text
+HyperPay: create payment returned HTTP 400: {"id":"8ac7a4a1...","result":{"code":"100.390.106",...
+```
+
+A response with no `result.code` in it — a proxy's HTML error page, a 401 — is still a
+transport failure and still raises.
+
+### Console messages that are not bugs
+
+Three things show up in the browser console during a real 3DS run and none of them is
+this application misbehaving. They are recorded here because each one looks alarming
+and each one has already cost an afternoon.
+
+```text
+SecurityError: Failed to read the 'cookie' property from 'Document':
+The document is sandboxed and lacks the 'allow-same-origin' flag.
+    at CookieController.applyRules (document-start.js)
+```
+
+`document-start.js` is a **browser extension** content script — an ad blocker or cookie
+manager — injected into the 3DS challenge document. That document is deliberately served
+under `Content-Security-Policy: sandbox` *without* `allow-same-origin`, so somebody
+else's markup cannot read this application's cookies. The extension tries anyway and
+throws inside its own stack. Nothing of ours reads `document.cookie` there, the form
+still submits, and the error is the sandbox working exactly as intended. It disappears
+in a private window with extensions off.
+
+```text
+Framing 'https://mtf.gateway.mastercard.com/' violates the following
+report-only Content Security Policy directive: "frame-ancestors 'self'".
+The violation has been logged, but no further action has been taken.
+```
+
+Geidea's hosted checkout is MPGS underneath, and its script frames MPGS inside our page —
+that is how Geidea's checkout is designed to work. Mastercard's own policy on that page
+is **report-only**, so nothing is blocked; the browser logs it and carries on, as the
+message itself says. It is Mastercard reporting on Mastercard, and there is no header we
+can set on our origin that changes it.
+
+```text
+mtf.gateway.mastercard.com/callbackInterface/cspViolationReport
+Failed to load resource: net::ERR_BLOCKED_BY_CLIENT
+```
+
+`ERR_BLOCKED_BY_CLIENT` is always an extension. This is the ad blocker blocking
+Mastercard's attempt to *report* the violation above. Both lines have the same cause and
+neither affects the payment.
+
+What *was* a real bug in the same area: the return leg used to answer with a 303, and a
+checkout mounted as a script returns the browser inside its own iframe, where
+`X-Frame-Options: DENY` then refused to render the target — an empty box for a payment
+that had actually succeeded. The return leg now serves a small document that climbs out
+to the top window first, and is the one route that opts out of the framing header.
+
 ### Call Log
 
 Geidea answers a malformed request with `responseCode=100` "General error" and a detailed
@@ -575,7 +652,7 @@ cd frontend && npm run build      # includes the type check
 The backend suite runs against SQLite and needs no services. It covers timing
 measurement, percentile maths, credential encryption, sensitive-data sanitization,
 error normalization, all seven adapters, the transaction lifecycle, webhook
-processing, exports and the admin/viewer boundary.
+processing, exports, and the authentication, user-management and role boundaries.
 
 CI runs all of it on every push, plus `alembic check` against real PostgreSQL and a
 build of both Docker images.
@@ -748,6 +825,43 @@ decrypted with anything else. Back the key up separately, and not on the same se
 * HPP flows redirect to the provider's own page. Direct API flows use tokenization
   where the provider offers it.
 
+### Authentication and accounts
+
+Everything except the login endpoint, the health check and the gateway webhook
+receivers requires an authenticated, active account — on the **backend**, not merely in
+the navigation. A user password is hashed with bcrypt and is never stored, logged,
+echoed in a response or shown to an administrator; a reset replaces it, and there is no
+route that reveals one.
+
+* **Sign in with a username or an email address.** Every failure — unknown handle,
+  wrong password, disabled account, locked account — returns the same message, and the
+  server does the same work in each case, so neither the body nor the clock is a user
+  directory.
+* **Sessions** are short-lived signed tokens. The cookie form is `HttpOnly`, `Secure`
+  wherever `PUBLIC_BASE_URL` is HTTPS, and `SameSite=Lax` — the strongest setting that
+  still lets a gateway return the browser from a hosted payment page. Cookie-carried
+  writes additionally need a double-submit CSRF token; bearer-header requests do not,
+  because nothing attaches a header automatically.
+* **Brute force** is met with two independent limits: a per-address sliding window
+  checked before any account is looked up, and a per-account lockout after
+  `LOGIN_MAX_FAILED_ATTEMPTS` consecutive failures. The lockout expires on its own; an
+  administrator can clear it sooner by re-enabling the account or resetting its
+  password.
+* **Roles.** `ADMIN` manages users and gateway credentials and changes system
+  configuration; `USER` signs in, runs payment tests, performs the permitted
+  transaction operations and reads everything the study produces. A normal user cannot
+  read or write a gateway credential.
+* **Status.** `ACTIVE`, `INACTIVE` or `LOCKED`; only `ACTIVE` may sign in. Accounts are
+  disabled rather than deleted, because the audit log and every transaction's
+  `created_by_user_id` point at the row.
+* **Audit.** `LOGIN_SUCCESS`, `LOGIN_FAILED`, `LOGOUT`, `USER_CREATED`, `USER_UPDATED`,
+  `USER_ROLE_CHANGED`, `USER_DISABLED`, `USER_ENABLED`, `USER_PASSWORD_RESET` and the
+  rest are written in the same transaction as the change they describe, with the client
+  address and user agent. Failed sign-ins against handles that match no account are
+  recorded too — that pattern is the point. Read-only, on **Users → Audit Log**; keys
+  that look like a credential are redacted before the row is written, whatever the
+  caller passed.
+
 <a id="card-entry"></a>
 ### Card entry
 
@@ -885,7 +999,9 @@ burapay/
 ```
 /api/health
 /api/docs                        OpenAPI documentation
-/api/v1/auth
+/api/v1/auth                     login, logout, me, change-password
+/api/v1/users                    administrators only
+/api/v1/audit-logs               administrators only
 /api/v1/gateways
 /api/v1/transactions
 /api/v1/benchmarks
