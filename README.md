@@ -11,6 +11,16 @@ adapter module and adding one line to a registry.
 
 ---
 
+## The specification
+
+[`docs/MASTER_PROMPT.md`](docs/MASTER_PROMPT.md) is the canonical spec — §0–§13,
+plus an appendix recording what is currently implemented on `master`.
+
+It lives in the repository rather than in a chat session, because that is how it
+drifted before: a session working from a stale copy reported contradictions that
+were really just an out-of-date brief. Change the requirement there, and record
+status in the appendix — never edit the requirement to match the code.
+
 ## Documentation status
 
 `docs.geidea.net` is unreachable from the build environment — the egress proxy
