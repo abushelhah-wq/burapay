@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import get_current_user, require_admin, require_user
 from app.db.session import get_session
 from app.models import BenchmarkRun, ComparisonTest, Gateway, User
 from app.schemas import (BenchmarkRunCreate, BenchmarkRunDetail, BenchmarkRunOut,
@@ -34,9 +34,14 @@ async def get_limits(_: User = Depends(get_current_user),
 
 
 @router.post("/runs", response_model=BenchmarkRunOut, status_code=status.HTTP_201_CREATED)
-async def create_run(payload: BenchmarkRunCreate, admin: User = Depends(require_admin),
+async def create_run(payload: BenchmarkRunCreate, user: User = Depends(require_user),
                      session: AsyncSession = Depends(get_session)) -> BenchmarkRunOut:
     """Queue a run and start it in the background.
+
+    Open to any signed-in account: a benchmark run is a batch of payment tests, which
+    section 10 puts inside a normal user's remit. The rate limits, which are what stop
+    a run becoming an attack on a provider, are administrator-configured and applied
+    here regardless of who started it.
 
     The requested transaction count and interval are clamped to the configured limits;
     what was requested and what was applied both land in the run's metadata, so a run
@@ -49,7 +54,7 @@ async def create_run(payload: BenchmarkRunCreate, admin: User = Depends(require_
             amount=payload.amount, transaction_count=payload.transaction_count,
             interval_seconds=payload.interval_seconds, environment=payload.environment,
             methodology=payload.methodology, payment_mode=payload.payment_mode,
-            created_by=admin.email)
+            created_by=user.username)
     except BenchmarkRefused as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     runner.start_run(run.id)
@@ -96,7 +101,7 @@ async def get_run(run_id: str, _: User = Depends(get_current_user),
 
 
 @router.post("/runs/{run_id}/cancel", response_model=Message)
-async def cancel_run(run_id: str, _: User = Depends(require_admin),
+async def cancel_run(run_id: str, _: User = Depends(require_user),
                      session: AsyncSession = Depends(get_session)) -> Message:
     run = await session.get(BenchmarkRun, run_id)
     if run is None:
@@ -125,7 +130,7 @@ async def delete_run(run_id: str, _: User = Depends(require_admin),
 @router.post("/comparison-tests", response_model=ComparisonTestOut,
              status_code=status.HTTP_201_CREATED)
 async def create_comparison_test(payload: ComparisonTestCreate,
-                                 admin: User = Depends(require_admin),
+                                 user: User = Depends(require_user),
                                  session: AsyncSession = Depends(get_session)
                                  ) -> ComparisonTestOut:
     """Run the same test against several gateways and produce one comparable set.
@@ -142,7 +147,7 @@ async def create_comparison_test(payload: ComparisonTestCreate,
             transactions_per_gateway=payload.transactions_per_gateway,
             interval_seconds=payload.interval_seconds, environment=payload.environment,
             methodology=payload.methodology, payment_mode=payload.payment_mode,
-            created_by=admin.email)
+            created_by=user.username)
     except BenchmarkRefused as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     runner.start_comparison(test.id, [run.id for run in runs])

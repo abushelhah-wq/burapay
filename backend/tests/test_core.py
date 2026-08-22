@@ -13,8 +13,10 @@ import pytest
 from app.core.crypto import decrypt_dict, encrypt_dict, mask
 from app.core.errors import ErrorCategory, GatewayError, category_for_http, normalize
 from app.core.sanitizer import sanitize, sanitize_headers, scrub_text
-from app.core.security import (create_access_token, decode_access_token, hash_password,
+from app.core.security import (PasswordPolicyError, create_access_token,
+                               decode_access_token, hash_password, validate_password,
                                verify_password)
+from app.models import UserRole, UserStatus, normalize_role
 from app.core.stats import percentile, rates, summarize
 
 
@@ -147,9 +149,104 @@ class TestSecurity:
 
     def test_tampered_token_is_rejected(self):
         import jwt
-        token = create_access_token("user-id", role="viewer", email="a@b.test")
+        token = create_access_token("user-id", role="USER", email="a@b.test")
         with pytest.raises(jwt.PyJWTError):
             decode_access_token(token[:-4] + "aaaa")
+
+    def test_expired_token_is_rejected(self):
+        import jwt
+        token = create_access_token("user-id", role="USER", email="a@b.test",
+                                    expires_minutes=-1)
+        with pytest.raises(jwt.ExpiredSignatureError):
+            decode_access_token(token)
+
+    def test_a_password_hash_is_salted(self):
+        """Two accounts with the same password must not share a hash."""
+        assert hash_password("Same Password 9!") != hash_password("Same Password 9!")
+
+
+class TestPasswordPolicy:
+    """Specification section 10: password complexity is enforced, not suggested."""
+
+    def test_a_strong_password_is_accepted(self):
+        validate_password("Corr3ct-Horse-Battery!", username="alice",
+                          email="alice@example.com")
+
+    @pytest.mark.parametrize("password, missing", [
+        ("Sh0rt!", "at least 12 characters"),
+        ("alllowercase9!", "an upper-case letter"),
+        ("ALLUPPERCASE9!", "a lower-case letter"),
+        ("NoDigitsInHere!", "a digit"),
+        ("NoSymbolsInHere9", "a symbol"),
+    ])
+    def test_weak_passwords_name_what_is_missing(self, password, missing):
+        with pytest.raises(PasswordPolicyError) as exc:
+            validate_password(password)
+        assert missing in exc.value.problems
+
+    def test_a_password_containing_the_username_is_refused(self):
+        with pytest.raises(PasswordPolicyError) as exc:
+            validate_password("Johnsmith-9-Aa!", username="johnsmith")
+        assert "something other than the username or email address" in exc.value.problems
+
+    def test_the_error_never_carries_the_password(self):
+        with pytest.raises(PasswordPolicyError) as exc:
+            validate_password("secret")
+        assert "secret" not in str(exc.value)
+
+    def test_over_length_passwords_are_refused_rather_than_truncated(self):
+        """bcrypt ignores everything past 72 bytes, which would make two differ by nothing."""
+        with pytest.raises(PasswordPolicyError):
+            validate_password("Aa9!" + "x" * 100)
+
+
+class TestAuditSanitizing:
+    def test_secret_looking_keys_are_redacted(self):
+        from app.services.audit import _safe_detail
+
+        clean = _safe_detail({"role": "ADMIN", "password": "hunter2",
+                              "nested": {"api_key": "sk_live_x", "status": "ACTIVE"}})
+        assert clean["role"] == "ADMIN"
+        assert clean["password"] == "[redacted]"
+        assert clean["nested"] == {"api_key": "[redacted]", "status": "ACTIVE"}
+
+    def test_nothing_is_lost_when_there_is_nothing_to_redact(self):
+        from app.services.audit import _safe_detail
+
+        assert _safe_detail({"from": "USER", "to": "ADMIN"}) == {"from": "USER", "to": "ADMIN"}
+
+
+class TestRoleAndStatusVocabulary:
+    def test_historical_role_values_still_read_back(self):
+        """Rows written before the rename must not become unreadable."""
+        assert normalize_role("admin") is UserRole.ADMIN
+        assert normalize_role("viewer") is UserRole.USER
+        assert normalize_role("USER") is UserRole.USER
+
+    def test_an_unknown_role_is_refused_rather_than_downgraded(self):
+        with pytest.raises(ValueError):
+            normalize_role("superuser")
+
+    def test_only_active_may_sign_in(self):
+        assert UserStatus.ACTIVE.can_sign_in
+        assert not UserStatus.INACTIVE.can_sign_in
+        assert not UserStatus.LOCKED.can_sign_in
+
+
+class TestLoginLimiter:
+    def test_the_window_slides(self):
+        from app.services.auth import SlidingWindowLimiter
+
+        limiter = SlidingWindowLimiter(limit=2, window_seconds=60)
+        assert limiter.check("a")[0]
+        limiter.hit("a")
+        limiter.hit("a")
+        allowed, retry_after = limiter.check("a")
+        assert not allowed and retry_after > 0
+        # Buckets are per key: one noisy address does not lock out everyone else.
+        assert limiter.check("b")[0]
+        limiter.clear("a")
+        assert limiter.check("a")[0]
 
 
 class TestErrorNormalization:

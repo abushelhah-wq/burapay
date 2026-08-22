@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_user, require_admin
+from app.api.deps import get_current_user, require_admin, require_user
 from app.api.v1.three_ds import (FORM_PATTERN, challenge_document,
                                  no_form_document)
 from app.core.config import settings as app_settings
@@ -66,9 +66,28 @@ def _accepted_card(payload: StartTransactionRequest) -> Optional[Card]:
                 holder=payload.card.holder)
 
 
+def _record_operator(transaction, payload: StartTransactionRequest, user: User) -> None:
+    """Attribute a customer- or merchant-initiated charge to whoever asked for it.
+
+    Section 10 wants ``requested_by_user_id`` on the operations the study runs against
+    an existing credential — CIT and MIT among them — separately from who created the
+    transaction, because the two are frequently different people. For a plain one-off
+    payment there is no separate request to attribute, so the field stays null and
+    ``created_by_user_id`` is the whole answer.
+    """
+    operation = None
+    if payload.payment_mode == "token":
+        operation = (payload.initiated_by or "MIT").upper()
+    elif payload.initiated_by:
+        operation = payload.initiated_by.upper()
+    if operation:
+        transaction.requested_by_user_id = user.id
+        transaction.requested_operation = operation[:40]
+
+
 @router.post("/start", response_model=StartTransactionResponse)
 async def start_transaction(payload: StartTransactionRequest,
-                            _: User = Depends(require_admin),
+                            user: User = Depends(require_user),
                             session: AsyncSession = Depends(get_session)
                             ) -> StartTransactionResponse:
     """Start one benchmarked transaction.
@@ -76,6 +95,10 @@ async def start_transaction(payload: StartTransactionRequest,
     Direct API completes here and returns the final status. HPP returns a redirect
     target: the customer's time on the gateway's page is theirs, and the transaction
     stays PENDING until they come back.
+
+    Open to any signed-in account: running payment tests is what a normal BuraPay user
+    is for (specification section 10). Who ran it is recorded on the transaction, so
+    the study can attribute every result.
     """
     card = _accepted_card(payload)
     try:
@@ -87,7 +110,10 @@ async def start_transaction(payload: StartTransactionRequest,
                 methodology=payload.methodology, payment_mode=payload.payment_mode,
                 card=card, token_id=payload.token_id,
                 agreement_id=payload.agreement_id, initiated_by=payload.initiated_by,
-                browser=payload.browser.model_dump() if payload.browser else None)
+                browser=payload.browser.model_dump() if payload.browser else None,
+                created_by_user_id=user.id)
+            _record_operator(transaction, payload, user)
+            await session.commit()
             context = transaction.context or {}
             return StartTransactionResponse(
                 transaction_id=transaction.id, status=transaction.status,
@@ -103,7 +129,9 @@ async def start_transaction(payload: StartTransactionRequest,
             session, gateway_code=payload.gateway_code, amount=payload.amount,
             currency=payload.currency, description=payload.description,
             reference=payload.reference, environment=payload.environment,
-            methodology=payload.methodology)
+            methodology=payload.methodology, created_by_user_id=user.id)
+        _record_operator(transaction, payload, user)
+        await session.commit()
         return StartTransactionResponse(
             transaction_id=transaction.id, status=transaction.status,
             redirect_url=hpp.redirect_url, mode=hpp.mode,

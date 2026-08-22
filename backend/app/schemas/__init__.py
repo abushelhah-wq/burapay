@@ -1,5 +1,6 @@
-from app.schemas.auth import (LoginRequest, PasswordChange, TokenResponse, UserCreate,
-                              UserOut)
+from app.schemas.auth import (AuditLogOut, LoginRequest, PasswordChange,
+                              PasswordReset, TokenResponse, UserCreate, UserOut,
+                              UserRoleOut, UserUpdate)
 from app.schemas.benchmarks import (ApiLogEntry, ApiMeasurementOut, BenchmarkRunCreate,
                                     BenchmarkRunDetail, BenchmarkRunOut,
                                     BrowserContext, BrowserMeasurementOut, BrowserMetricsIn,
@@ -14,15 +15,16 @@ from app.schemas.gateways import (CredentialFieldOut, CredentialUpdate, Credenti
                                   GatewayUpdate)
 
 __all__ = [
-    "ApiLogEntry", "ApiMeasurementOut", "BenchmarkRunCreate", "BenchmarkRunDetail", "BenchmarkRunOut",
+    "ApiLogEntry", "AuditLogOut", "ApiMeasurementOut", "BenchmarkRunCreate", "BenchmarkRunDetail", "BenchmarkRunOut",
     "BrowserContext", "BrowserMeasurementOut", "BrowserMetricsIn", "CardIn",
     "ComparisonTestCreate",
     "ComparisonTestOut", "CredentialFieldOut", "CredentialUpdate", "CredentialsOut",
     "ErrorResponse", "GatewayDetail", "GatewayHealthOut", "GatewayOut", "GatewayUpdate",
     "HppHandoff",
     "HealthResponse", "LoginRequest", "Message", "ORMModel", "Page", "PasswordChange",
-    "StartTransactionRequest", "StartTransactionResponse", "StatSummary",
+    "PasswordReset", "StartTransactionRequest", "StartTransactionResponse",
+    "StatSummary",
     "ThreeDsChallenge",
     "TokenResponse", "TransactionDetail", "TransactionEventOut", "TransactionOut",
-    "UserCreate", "UserOut",
+    "UserCreate", "UserOut", "UserRoleOut", "UserUpdate",
 ]

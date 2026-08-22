@@ -8,13 +8,14 @@
  */
 
 import type {
-  AppSettings, BenchmarkRun, ComparisonRow, ComparisonTest, Dashboard, Gateway,
-  ApiLogEntry, GatewayHealth, HppRow, LogFilters, LogSummary, Page, Ranking,
-  ThreeDsChallenge, Transaction, TransactionDetail, User,
+  AppSettings, AuditLogEntry, BenchmarkRun, ComparisonRow, ComparisonTest, Dashboard,
+  Gateway, ApiLogEntry, GatewayHealth, HppRow, LogFilters, LogSummary, Page, Ranking,
+  RoleDescription, ThreeDsChallenge, Transaction, TransactionDetail, User, UserFilters,
 } from './types'
 
 const BASE = '/api'
 const TOKEN_KEY = 'burapay.token'
+const CSRF_KEY = 'burapay.csrf'
 
 export class ApiError extends Error {
   status: number
@@ -39,6 +40,24 @@ export function setToken(token: string | null): void {
   else localStorage.removeItem(TOKEN_KEY)
 }
 
+/**
+ * The CSRF token from the last sign-in.
+ *
+ * Only needed for requests the browser authenticates with the session cookie — the
+ * gateway return leg, a report opened in a new tab. Requests from this client carry a
+ * bearer header instead, which nothing attaches automatically and so cannot be
+ * forged cross-site. It is sent on every write regardless, so the app keeps working if
+ * the bearer token is ever dropped in favour of the cookie alone.
+ */
+export function getCsrfToken(): string | null {
+  return localStorage.getItem(CSRF_KEY)
+}
+
+export function setCsrfToken(token: string | null): void {
+  if (token) localStorage.setItem(CSRF_KEY, token)
+  else localStorage.removeItem(CSRF_KEY)
+}
+
 function query(params: Record<string, unknown> = {}): string {
   const search = new URLSearchParams()
   for (const [key, value] of Object.entries(params)) {
@@ -57,12 +76,17 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
 
+  const csrf = getCsrfToken()
+  const method = (init.method ?? 'GET').toUpperCase()
+  if (csrf && method !== 'GET' && method !== 'HEAD') headers.set('X-CSRF-Token', csrf)
+
   const response = await fetch(`${BASE}${path}`, { ...init, headers, credentials: 'same-origin' })
 
   if (response.status === 401) {
     // The session is gone; clearing the token routes the app back to the sign-in page
     // rather than leaving every panel showing a permission error.
     setToken(null)
+    setCsrfToken(null)
     throw new ApiError('Your session has expired. Please sign in again.', 401)
   }
 
@@ -105,21 +129,46 @@ export interface TransactionFilters {
 
 export const api = {
   // -- auth ------------------------------------------------------------- //
-  login: (email: string, password: string) =>
-    request<{ access_token: string; expires_in: number; user: User }>('/v1/auth/login', {
-      method: 'POST', body: JSON.stringify({ email, password }),
-    }),
+  /** `username` accepts a username or an email address (specification section 9). */
+  login: (username: string, password: string) =>
+    request<{ access_token: string; expires_in: number; csrf_token: string; user: User }>(
+      '/v1/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   logout: () => request<{ message: string }>('/v1/auth/logout', { method: 'POST' }),
   me: () => request<User>('/v1/auth/me'),
-  changePassword: (current_password: string, new_password: string) =>
+  changePassword: (current_password: string, new_password: string,
+                   confirm_password?: string) =>
     request<{ message: string }>('/v1/auth/change-password', {
-      method: 'POST', body: JSON.stringify({ current_password, new_password }),
+      method: 'POST',
+      body: JSON.stringify({ current_password, new_password, confirm_password }),
     }),
-  users: () => request<User[]>('/v1/auth/users'),
-  createUser: (payload: { email: string; password: string; full_name?: string; role: string }) =>
-    request<User>('/v1/auth/users', { method: 'POST', body: JSON.stringify(payload) }),
-  deleteUser: (id: string) =>
-    request<{ message: string }>(`/v1/auth/users/${id}`, { method: 'DELETE' }),
+
+  // -- users (administrators only) --------------------------------------- //
+  users: (filters: UserFilters = {}) =>
+    request<Page<User>>(`/v1/users${query(filters as Record<string, unknown>)}`),
+  user: (id: string) => request<User>(`/v1/users/${id}`),
+  roles: () => request<RoleDescription[]>('/v1/users/roles'),
+  createUser: (payload: {
+    full_name?: string; username: string; email: string; role: string
+    password: string; confirm_password: string; status: string
+  }) => request<User>('/v1/users', { method: 'POST', body: JSON.stringify(payload) }),
+  updateUser: (id: string, payload: {
+    full_name?: string | null; email?: string; role?: string; status?: string
+  }) => request<User>(`/v1/users/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  disableUser: (id: string) =>
+    request<User>(`/v1/users/${id}/disable`, { method: 'POST' }),
+  enableUser: (id: string) =>
+    request<User>(`/v1/users/${id}/enable`, { method: 'POST' }),
+  resetUserPassword: (id: string, new_password: string, confirm_password: string) =>
+    request<{ message: string }>(`/v1/users/${id}/reset-password`, {
+      method: 'POST', body: JSON.stringify({ new_password, confirm_password }),
+    }),
+  userAudit: (id: string, limit = 50) =>
+    request<Page<AuditLogEntry>>(`/v1/users/${id}/audit${query({ limit })}`),
+
+  // -- audit log (administrators only) ----------------------------------- //
+  auditLogs: (filters: { event?: string; user_id?: string; limit?: number; offset?: number } = {}) =>
+    request<Page<AuditLogEntry>>(`/v1/audit-logs${query(filters)}`),
+  auditEvents: () => request<string[]>('/v1/audit-logs/events'),
 
   // -- gateways --------------------------------------------------------- //
   gateways: (environment = 'sandbox') =>

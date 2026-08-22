@@ -13,9 +13,17 @@ import { api } from '../api/client'
 import type { AppSettings } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 
-const NAV = [
+interface NavItem {
+  to: string
+  label: string
+  end?: boolean
+  adminOnly?: boolean
+  children?: NavItem[]
+}
+
+const NAV: NavItem[] = [
   { to: '/', label: 'Dashboard', end: true },
-  { to: '/run', label: 'Run Benchmark', adminOnly: true },
+  { to: '/run', label: 'Run Benchmark' },
   { to: '/transactions', label: 'Transactions' },
   { to: '/comparison', label: 'Comparison' },
   { to: '/reports', label: 'Reports' },
@@ -23,6 +31,19 @@ const NAV = [
   // does, not about how one payment went.
   { to: '/logs', label: 'Call Log' },
   { to: '/gateways', label: 'Gateways' },
+  // Section 12: administrators only. The backend refuses these routes to anyone else
+  // regardless of what the sidebar shows — hiding the link is convenience, not a
+  // permission boundary.
+  {
+    to: '/users',
+    label: 'Users',
+    adminOnly: true,
+    children: [
+      { to: '/users', label: 'User List', end: true },
+      { to: '/users/new', label: 'Create User' },
+      { to: '/users/audit', label: 'Audit Log' },
+    ],
+  },
   { to: '/settings', label: 'Settings' },
 ]
 
@@ -78,6 +99,9 @@ export default function Layout() {
   }
 
   const items = NAV.filter((item) => !item.adminOnly || isAdmin)
+  const linkClass = (isActive: boolean, nested = false) =>
+    `mb-1 block rounded-lg py-2 text-sm font-medium transition ${nested ? 'pl-6 pr-3' : 'px-3'}
+     ${isActive ? 'bg-accent-600 text-white' : 'text-ink-300 hover:bg-ink-800 hover:text-white'}`
 
   return (
     <div className="flex min-h-full flex-col">
@@ -100,22 +124,34 @@ export default function Layout() {
 
           <nav className={`${menuOpen ? 'block' : 'hidden'} px-3 pb-4 lg:block`}>
             {items.map((item) => (
-              <NavLink key={item.to} to={item.to} end={item.end}
-                       onClick={() => setMenuOpen(false)}
-                       className={({ isActive }) =>
-                         `mb-1 block rounded-lg px-3 py-2 text-sm font-medium transition
-                          ${isActive ? 'bg-accent-600 text-white'
-                                     : 'text-ink-300 hover:bg-ink-800 hover:text-white'}`}>
-                {item.label}
-              </NavLink>
+              <div key={item.to}>
+                <NavLink to={item.to} end={item.end ?? Boolean(item.children)}
+                         onClick={() => setMenuOpen(false)}
+                         className={({ isActive }) => linkClass(isActive)}>
+                  {item.label}
+                </NavLink>
+                {item.children?.map((child) => (
+                  <NavLink key={child.to} to={child.to} end={child.end}
+                           onClick={() => setMenuOpen(false)}
+                           className={({ isActive }) => linkClass(isActive, true)}>
+                    {child.label}
+                  </NavLink>
+                ))}
+              </div>
             ))}
 
             <div className="mt-6 border-t border-ink-800 px-3 pt-4">
               <p className="text-xs text-ink-400">Signed in as</p>
-              <p className="truncate text-sm text-ink-200">{user?.email}</p>
+              <p className="truncate text-sm text-ink-200">{user?.username}</p>
+              <p className="truncate text-xs text-ink-400">{user?.email}</p>
               <p className="mt-0.5 text-xs uppercase tracking-wide text-accent-300">
                 {user?.role}
               </p>
+              <NavLink to="/account" onClick={() => setMenuOpen(false)}
+                       className="mt-3 block w-full rounded-lg border border-ink-700 px-3
+                                  py-1.5 text-center text-xs text-ink-300 hover:bg-ink-800">
+                Change password
+              </NavLink>
               <button type="button" onClick={handleSignOut}
                       className="mt-3 w-full rounded-lg border border-ink-700 px-3 py-1.5
                                  text-xs text-ink-300 hover:bg-ink-800">

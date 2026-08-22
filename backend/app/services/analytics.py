@@ -28,7 +28,7 @@ from app.core.stats import MIN_RANKING_SAMPLES, rates, summarize
 from app.benchmarks.scoring import ScoreInput, score_all
 from app.gateways.registry import SIMULATED_CODES, documented_calls
 from app.models import (ApiMeasurement, BenchmarkRun, Gateway,
-                        GatewayHealthCheck, Transaction, TransactionStatus)
+                        GatewayHealthCheck, Transaction, TransactionStatus, User)
 from app.services import bootstrap as settings_service
 
 #: Statuses that mean the flow reached its end and its duration is comparable.
@@ -435,12 +435,28 @@ async def ranking(session: AsyncSession, filters: TransactionFilters,
     return result
 
 
+async def _usernames(session: AsyncSession, ids: Sequence[Optional[str]]) -> Dict[str, str]:
+    """Resolve user ids to usernames in one query, tolerating nulls and unknowns."""
+    wanted = {value for value in ids if value}
+    if not wanted:
+        return {}
+    rows = await session.execute(select(User.id, User.username).where(User.id.in_(wanted)))
+    return {row[0]: row[1] for row in rows}
+
+
 async def transaction_detail(session: AsyncSession, transaction: Transaction) -> Dict[str, Any]:
     """One transaction with its call list, timeline and browser metrics (section 45)."""
     await session.refresh(transaction, ["measurements", "events", "browser_measurements"])
     timed = [m for m in transaction.measurements if not m.is_setup_call]
+    owners = await _usernames(session, [transaction.created_by_user_id,
+                                        transaction.requested_by_user_id])
     return {
         "transaction": transaction,
+        # Section 10: who ran this test, and who asked for the operation on it. Resolved
+        # here so the detail page never has to call the administrator-only users API
+        # just to render a name.
+        "created_by_username": owners.get(transaction.created_by_user_id or ""),
+        "requested_by_username": owners.get(transaction.requested_by_user_id or ""),
         "measurements": transaction.measurements,
         "events": transaction.events,
         "browser_measurements": transaction.browser_measurements,

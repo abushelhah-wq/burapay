@@ -220,7 +220,8 @@ async def run_direct_transaction(
         payment_mode: str = "standard", card: Optional[Card] = None,
         token_id: Optional[str] = None, agreement_id: Optional[str] = None,
         initiated_by: Optional[str] = None,
-        browser: Optional[Mapping[str, Any]] = None) -> Transaction:
+        browser: Optional[Mapping[str, Any]] = None,
+        created_by_user_id: Optional[str] = None) -> Transaction:
     """Run one Direct API transaction.
 
     Usually start to final state in this process. A gateway that stops for a 3DS
@@ -256,7 +257,8 @@ async def run_direct_transaction(
         merchant_reference=reference, integration_type=IntegrationType.DIRECT.value,
         payment_mode=payment_mode, environment=environment, amount=amount,
         currency=currency.upper(), description=description,
-        status=TransactionStatus.IN_PROGRESS.value, methodology=methodology)
+        status=TransactionStatus.IN_PROGRESS.value, methodology=methodology,
+        created_by_user_id=created_by_user_id)
     session.add(transaction)
     await session.flush()          # id is needed before the flow starts
 
@@ -378,8 +380,8 @@ async def start_hpp_transaction(
         session: AsyncSession, *, gateway_code: str, amount: float, currency: str,
         description: str = "BuraPay benchmark transaction",
         reference: Optional[str] = None, environment: str = "sandbox",
-        benchmark_run_id: Optional[str] = None,
-        methodology: str = "mixed") -> Tuple[Transaction, HppSession]:
+        benchmark_run_id: Optional[str] = None, methodology: str = "mixed",
+        created_by_user_id: Optional[str] = None) -> Tuple[Transaction, HppSession]:
     """Create the hosted session and return where to send the browser.
 
     The transaction stays ``PENDING`` until the customer comes back: the time they
@@ -398,7 +400,7 @@ async def start_hpp_transaction(
         merchant_reference=reference, integration_type=IntegrationType.HPP.value,
         environment=environment, amount=amount, currency=currency.upper(),
         description=description, status=TransactionStatus.IN_PROGRESS.value,
-        methodology=methodology)
+        methodology=methodology, created_by_user_id=created_by_user_id)
     session.add(transaction)
     await session.flush()
 

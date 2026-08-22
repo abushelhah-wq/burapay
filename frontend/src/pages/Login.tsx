@@ -6,7 +6,7 @@ import { useAuth } from '../auth/AuthContext'
 export default function Login() {
   const { signIn } = useAuth()
   const navigate = useNavigate()
-  const [email, setEmail] = useState('')
+  const [handle, setHandle] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -16,7 +16,7 @@ export default function Login() {
     setBusy(true)
     setError(null)
     try {
-      await signIn(email, password)
+      await signIn(handle, password)
       navigate('/')
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : 'Sign in failed.')
@@ -35,9 +35,10 @@ export default function Login() {
 
         <form onSubmit={handleSubmit} className="card space-y-4 p-6">
           <div>
-            <label className="label" htmlFor="email">Email</label>
-            <input id="email" type="email" className="input" value={email} required
-                   autoComplete="username" onChange={(e) => setEmail(e.target.value)} />
+            <label className="label" htmlFor="handle">Username or email</label>
+            <input id="handle" type="text" className="input" value={handle} required
+                   autoComplete="username" autoFocus
+                   onChange={(e) => setHandle(e.target.value)} />
           </div>
           <div>
             <label className="label" htmlFor="password">Password</label>
